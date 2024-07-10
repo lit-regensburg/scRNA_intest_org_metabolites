@@ -1,0 +1,319 @@
+---
+title: "GSEA of differential expression between conditions"
+author: "Paul Heinrich"
+output: 
+    html_document:
+        toc: true
+---
+
+```{r setup1, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Notes
+
+GSEA of differential expression between conditions (nebula model). Celltypes were assigned with
+SingleR, Stem cells and TA cells were separated through additional clustering, leaving an ambiguous
+Stem-TA population.
+
+```{r setup2,echo=FALSE, warning=FALSE}
+#rbioc_3-14
+library(rprojroot)
+library(yaml)
+library(knitr)
+
+saveData <- TRUE
+
+root_criterion <- ".projroot"
+proot <- rprojroot::has_file(root_criterion)
+
+source(proot$find_file("experiments/scRNA/analysis/custom/functions/custom_functions.R"))
+
+params <- list()
+params$config <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/config.yaml")
+params$analparams <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/analparams_preprocessing_filters_2023-03-24.yaml")
+params$date <- Sys.Date()
+
+config <- yaml.load_file(proot$find_file(params$config))
+today <- params$date
+
+print(today)
+
+config <- yaml.load_file(proot$find_file(params$config))
+analparams <- yaml.load_file(proot$find_file(params$analparams))
+
+# libraries
+libload <- c(
+    "Seurat","ggplot2", "harmony", "Nebulosa", "future",
+    "WriteXLS", "knitr", "stringr", "dplyr", "fgsea", "msigdbr",
+    "foreach", "doParallel"
+)
+
+for(i in libload) {
+    library(i, character.only = T)
+}
+
+plan("multicore", workers = 6)
+plan()
+
+# Parallelization with doParallel
+
+registerDoParallel(7)
+
+set.seed(7)
+
+```
+
+```{r loaddata,eval=T,echo=F}
+
+diffExpression <- readRDS(proot$find_file(config$outputpath, "data", "stats_nebula_cond_cpc-0.005_monocle_Stem-TA_ref_regress-cc_2024-03-21.rds"))
+
+```
+
+# Get GSEA gene sets
+
+```{r get_genesets, eval=T, echo=F}
+
+# Show available collections
+
+kable(msigdbr_collections())
+
+species <- "Mus musculus"
+
+# Fetch tables with selected gene set libraries from MSigDB
+
+msigdbTables <- list()
+
+msigdbTables[["HALLMARK"]] <- msigdbr(species = species, category = "H")
+msigdbTables[["REACTOME"]] <- msigdbr(species = species, category = "C2", subcategory = "CP:REACTOME")
+msigdbTables[["KEGG"]] <- msigdbr(species = species, category = "C2", subcategory = "CP:KEGG")
+msigdbTables[["TFT_GTRD"]] <- msigdbr(species = species, category = "C3", subcategory = "TFT:GTRD")
+
+# Create a list of gene sets via splitting gene set tables by gene set name
+
+msigdbSets <- lapply(msigdbTables, function(x) split(x$gene_symbol, x$gs_name))
+
+```
+
+```{r process_genesets, eval=T, echo=F}
+
+celltypes <- names(diffExpression)
+fractionGenesFound <- list()
+msigdbSetsEff <- list()
+
+for (celltype in celltypes) {
+    print(paste0("Celltype: ", celltype))
+    print(Sys.time())
+
+    fractionGenesFound[[celltype]] <- list()
+    msigdbSetsEff[[celltype]] <- list()
+    genesTested <- diffExpression[[celltype]]$gene
+
+    for (geneSetLib in names(msigdbSets)) {
+        print(paste0("Gene set library: ", geneSetLib))
+
+        msigdbSetsEff[[celltype]][[geneSetLib]] <- list()
+        fractionGenesFound[[celltype]][[geneSetLib]] <- rep(NA, length(msigdbSets[[geneSetLib]]))
+        names(fractionGenesFound[[celltype]][[geneSetLib]]) <- names(msigdbSets[[geneSetLib]])
+
+        for (geneSet in names(msigdbSets[[geneSetLib]])) {
+            currSet <- msigdbSets[[geneSetLib]][[geneSet]]
+            currSetEff <- currSet[currSet %in% genesTested]
+
+            msigdbSetsEff[[celltype]][[geneSetLib]][[geneSet]] <- currSetEff
+            fractionGenesFound[[celltype]][[geneSetLib]][geneSet] <- length(currSetEff)/length(currSet)
+        }
+    }
+}
+
+threshold <- 0.7
+
+msigdbSetsEffSubset <- list()
+
+for (celltype in celltypes) {
+    msigdbSetsEffSubset[[celltype]] <- list()
+
+    for (geneSetLib in names(msigdbSets)) {
+        geneSetsAboveThreshold <- names(fractionGenesFound[[celltype]][[geneSetLib]])[
+            fractionGenesFound[[celltype]][[geneSetLib]] >= threshold
+        ]
+        msigdbSetsEffSubset[[celltype]][[geneSetLib]] <- msigdbSetsEff[[celltype]][[geneSetLib]][
+            geneSetsAboveThreshold
+        ]
+    }
+}
+
+```
+
+```{r prepare_gene_ranks, eval=T, echo=F}
+
+relevantCelltypes <- c(
+    "Stem",
+    "Stem.TA",
+    "TA",
+    "Enterocyte.Progenitor",
+    "Enterocyte",
+    "Endocrine",
+    "Goblet.Paneth"
+)
+
+relevantComparisons <- c(
+    "WT_DAT_vs_WT_Ctrl",
+    "WT_ICA_vs_WT_Ctrl",
+    "WT_DAT_vs_WT_ICA",
+    "GT_DAT_vs_GT_Ctrl",
+    "GT_ICA_vs_GT_Ctrl",
+    "GT_DAT_vs_GT_ICA",
+    "GT_Ctrl_vs_WT_Ctrl",
+    "GT_DAT_vs_WT_DAT",
+    "GT_ICA_vs_WT_ICA"
+)
+
+rankedGenes <- list()
+rankingTables <- list()
+
+for (celltype in names(diffExpression)) {
+    rankingTables[[celltype]] <- list()
+    rankedGenes[[celltype]] <- list()
+    for (comparison in relevantComparisons) {
+        currTable <- data.frame(
+            "gene" = diffExpression[[celltype]]$gene,
+            "p_val" = diffExpression[[celltype]][[paste0("p_", comparison)]],
+            "logFC" = diffExpression[[celltype]][[paste0("logFC_", comparison)]]
+        )
+        currTable$p_val[currTable$p_val < .Machine$double.xmin] <- .Machine$double.xmin
+
+        negLog10pval <- (-1)*log10(currTable[["p_val"]])
+        negLog10pvalSigned <- sign(currTable[["logFC"]])*negLog10pval
+        currTable[["signed_neg_log10_pval"]] <- negLog10pvalSigned
+        currTable <- currTable[order(
+            -currTable[["signed_neg_log10_pval"]],
+            -currTable[["logFC"]]
+        ), ]
+        rankingTables[[celltype]][[comparison]] <- currTable
+        rankedGenes[[celltype]][[comparison]] <- currTable[["signed_neg_log10_pval"]]
+        names(rankedGenes[[celltype]][[comparison]]) <- currTable$gene
+    }
+}
+
+```
+
+```{r fgsea, eval=T, echo=F}
+
+fgseaResults <- foreach(celltype = names(rankedGenes)) %dopar% {
+    currFgseaResults <- list()
+
+    for (comparison in names(rankedGenes[[celltype]])) {
+        print(Sys.time())
+        print(paste0("Celltype ", celltype, ", comparison: ", comparison))
+
+        currFgseaResults[[comparison]] <- list()
+        currGenes <- rankedGenes[[celltype]][[comparison]]
+        
+        for (geneSetLib in names(msigdbSetsEffSubset[[celltype]])) {
+            currFgseaResults[[comparison]][[geneSetLib]] <- as.data.frame(
+                fgsea(
+                    pathways = msigdbSetsEffSubset[[celltype]][[geneSetLib]],
+                    stats = currGenes,
+                    minSize = 5,
+                    maxSize = 500
+                )
+            )
+        }
+    }
+
+    currFgseaResults
+}
+names(fgseaResults) <- names(rankedGenes)
+
+```
+
+```{r prepare_fgsea_results, eval=T, echo=F}
+
+fgseaResultsCombined <- list()
+
+for (celltype in names(fgseaResults)) {
+    fgseaResultsCombined[[celltype]] <- data.frame()
+    for (comparison in names(fgseaResults[[celltype]])) {
+        for (geneSetLib in names(fgseaResults[[celltype]][[comparison]])) {
+            currTable <- fgseaResults[[celltype]][[comparison]][[geneSetLib]]
+
+            currTable[["comparison"]] <- comparison
+            currTable[["gene_set_lib"]] <- geneSetLib
+            currTable[["gene_set_coverage"]] <- fractionGenesFound[[celltype]][[geneSetLib]][
+                currTable[["pathway"]]
+            ]
+
+            fgseaResultsCombined[[celltype]] <- rbind(
+                fgseaResultsCombined[[celltype]],
+                currTable
+            )
+        }
+    }
+
+    fgseaResultsCombined[[celltype]][["padj_fdr"]] <- p.adjust(fgseaResultsCombined[[celltype]][["pval"]], method = "BH")
+
+    colnamesNewOrder <- c(
+        "comparison",
+        "gene_set_lib",
+        "pathway",
+        "pval",
+        "padj_fdr",
+        "NES",
+        "gene_set_coverage",
+        "size",
+        "ES",
+        "padj",
+        "log2err",
+        "leadingEdge"
+    )
+
+    fgseaResultsCombined[[celltype]]$comparison <- factor(
+        fgseaResultsCombined[[celltype]]$comparison, levels = relevantComparisons
+    )
+
+    fgseaResultsCombined[[celltype]] <- fgseaResultsCombined[[celltype]][, colnamesNewOrder]
+    fgseaResultsCombined[[celltype]] <- as.data.frame(
+        fgseaResultsCombined[[celltype]] %>% arrange(comparison, desc(sign(NES)), padj_fdr)
+    )
+}
+
+```
+
+```{r save_data, echo=FALSE, warning=FALSE, eval=saveData}
+
+saveRDS(
+    fgseaResultsCombined,
+    proot$find_file(config$outputpath, "data", paste0("gsea_nebula_cond_cpc-0.005_monocle_Stem-TA_ref_regress-cc_", today, ".rds"))
+)
+
+for (celltype in celltypes) {
+    currTables <- list()
+
+    for (currComparison in relevantComparisons) {
+        currTables[[currComparison]] <- fgseaResultsCombined[[celltype]] %>%
+            filter(comparison == currComparison) %>%
+            select(1:8) %>%
+            arrange(-sign(NES), padj_fdr)
+    }
+
+    currFilename <- paste0(
+        "gsea_nebula_cond_cpc-0.005_monocle_Stem-TA_ref_regress-cc_", celltype, "_", today, ".xlsx"
+    )
+
+    WriteXLS(
+        currTables,
+        proot$find_file(config$outputpath, "table", currFilename)
+    )
+}
+
+```
+
+# SessionInfo
+
+```{r sessionInfo}
+
+sessionInfo()
+
+```
+

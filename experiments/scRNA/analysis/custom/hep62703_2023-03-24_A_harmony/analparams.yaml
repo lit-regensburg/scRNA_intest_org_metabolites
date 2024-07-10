@@ -1,0 +1,24 @@
+Seurat_rawobj:
+Seurat_rawall:
+config:
+
+# outputpath
+outpaths:
+  fig: fig
+  table: table
+  data: data
+  report: report
+
+# filter
+filters:
+  nCount_RNA: ~
+  nFeature_RNA: ~
+  percent.mt: ~
+
+#PCA
+scParam:
+  PCdims: #30
+  jack: FALSE # jackStraw Plot
+  VarFeat: 3000
+  integration: # harmony,seurat
+

@@ -1,0 +1,151 @@
+---
+title: "scRNA-seq of cells from metabolite-treated mouse intenstine organoids"
+subtitle: "GSEA of differential expression between conditions"
+author: "Paul Heinrich"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+        toc_collapsed: true
+        toc_depth: 3
+---
+
+```{r setup1, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Analysis notes
+
+The experiment covered the treatment of WT and GT mouse intenstine organoids with the metabolites DAT
+and ICA. Organoids were suspended to single cell supensions, labeled with HTO antibodies, and different treatment
+groups were pooled. FACS was used to filter viable intestinal cells. Cells were then subjected to 10X Genomics processing
+to isolate cDNA of mRNA and HTOs of single cells. The amplyfied libraries were then sequenced on an Illumnia NGS device.
+
+Here, GSEA of differential expression between conditions for different celltypes has been performed.
+Differential expression was assessed with a NEBULA model employing condition, batch and number of RNA features
+per cell as covariates, with a minimum cpc of 0.005. Celltypes were assigned with SingleR using a mouse intenstine reference dataset
+from Haber et al. (2017). Because separation of Stem cells and TA (transit amplifying) cells was fuzzy, these cells were separated
+through additional clustering in Seurat, based on differential genes between Stem and TA in the reference.
+This resulted in a Stem, a TA and an ambiguous Stem-TA population.
+
+GSEA was performed with gene set libraries from MSigDB: HALLMARK (a collection of specifically curated gene sets and pathways),
+REACTOME, KEGG and TFT_GTRD (transcription factor targets). As only about one third of genes could be validly tested
+for differential expression in the NEBULA model due to low counts, a substantial fraction of gene set genes were not
+tested. Thus, only gene sets where at least 70% of genes could be tested were included in the analysis, and untested
+genes were removed from the sets prior to GSEA. Adjustment for multiple testing was done per celltype with the FDR
+approach.
+
+GSEA results are provided as tables per celltype and comparison, and split into up- and downregulated gene sets.
+Only pathways with an adjusted p-value <= 0.1 are shown (controlling for 10% FDR).
+
+**Column explanation:**
+
+* gene_set_lib: Gene set library
+* pathway: pathway or gene set from library
+* pval: unadjusted p-value
+* padj_fdr: FDR-adjusted p-value
+* NES: Normalized enrichment score. GSEA pathway enrichment score normalized by gene set size.
+A positive normalized enrichment score means upregulation in first group compared to the second group in
+the comparison
+* gene_set_coverage: Fraction of genes in the gene set that could be tested for differential expression
+* size: Size of the gene set (after removing untested genes)
+
+```{r setup2,echo=FALSE, warning=FALSE, message=FALSE, results='hide'}
+#rbioc_3-14
+library(rprojroot)
+library(yaml)
+library(knitr)
+
+saveData <- TRUE
+
+root_criterion <- ".projroot"
+proot <- rprojroot::has_file(root_criterion)
+
+source(proot$find_file("experiments/scRNA/analysis/custom/functions/custom_functions.R"))
+
+params <- list()
+params$config <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/config.yaml")
+params$analparams <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/analparams_preprocessing_filters_2023-03-24.yaml")
+params$date <- Sys.Date()
+
+config <- yaml.load_file(proot$find_file(params$config))
+today <- params$date
+
+config <- yaml.load_file(proot$find_file(params$config))
+analparams <- yaml.load_file(proot$find_file(params$analparams))
+
+# libraries
+libload <- c(
+    "Seurat","ggplot2", "harmony", "Nebulosa", "future",
+    "WriteXLS", "knitr", "stringr", "dplyr", "fgsea", "msigdbr"
+)
+
+for(i in libload) {
+    library(i, character.only = T)
+}
+
+plan("multicore", workers = 6)
+plan()
+
+set.seed(7)
+```
+
+```{r loaddata,eval=T,echo=F}
+
+fgseaResults <- readRDS(proot$find_file(config$outputpath, "data", "gsea_nebula_cond_cpc-0.005_monocle_Stem-TA_ref_regress-cc_2024-03-21.rds"))
+
+```
+
+# Regulated pathways/gene sets by celltype and comparison
+
+```{r show_fgsea_results, eval=T, echo=F, results='asis'}
+
+print(today)
+cat("\n\n")
+
+for (celltype in names(fgseaResults)) {
+    cat(paste0("## ", celltype))
+    cat("\n\n")
+    comparisons <- unique(fgseaResults[[celltype]]$comparison)
+
+    for (comp in comparisons) {
+        cat(paste0("### ", comp))
+        cat("\n\n")
+
+        currTable <- fgseaResults[[celltype]] %>%
+            filter(comparison == comp) %>%
+            filter(padj_fdr <= 0.1) %>%
+            mutate(pval = format(pval, digits = 3, scientific = TRUE)) %>%
+            mutate(padj_fdr = format(padj_fdr, digits = 3, scientific = TRUE))
+
+        tableUp <- currTable %>% filter(NES >= 0)
+        tableDown <- currTable %>% filter(NES < 0)
+
+        cat("#### Upregulated")
+        cat("\n\n")
+
+        if (nrow(tableUp)) {
+            print(kable(tableUp[, 2:8]))
+            cat("\n\n")
+        }
+
+        cat("#### Downregulated")
+        cat("\n\n")
+
+        if (nrow(tableDown)) {
+            print(kable(tableDown[, 2:8]))
+            cat("\n\n")
+        }
+    }
+}
+
+```
+
+# SessionInfo
+
+```{r sessionInfo}
+
+sessionInfo()
+
+```
+

@@ -1,0 +1,480 @@
+---
+title: "scRNA-seq of cells from metabolite-treated mouse intenstine organoids"
+subtitle: "Pathway analysis figures"
+author: "Paul Heinrich"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+        toc_collapsed: true
+        toc_depth: 3
+---
+
+```{r setup1, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r setup2,echo=FALSE, warning=FALSE, message=FALSE, results='hide'}
+#rbioc_3-14
+library(rprojroot)
+library(yaml)
+library(knitr)
+
+saveData <- TRUE
+
+root_criterion <- ".projroot"
+proot <- rprojroot::has_file(root_criterion)
+
+source(proot$find_file("experiments/scRNA/analysis/custom/functions/custom_functions.R"))
+
+params <- list()
+params$config <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/config.yaml")
+params$analparams <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/analparams_preprocessing_filters_2023-03-24.yaml")
+params$date <- Sys.Date()
+
+config <- yaml.load_file(proot$find_file(params$config))
+today <- params$date
+
+config <- yaml.load_file(proot$find_file(params$config))
+analparams <- yaml.load_file(proot$find_file(params$analparams))
+
+# libraries
+libload <- c(
+    "Seurat","ggplot2", "harmony", "Nebulosa", "future",
+    "WriteXLS", "knitr", "stringr", "tidyr", "dplyr", "pheatmap",
+    "RColorBrewer"
+)
+
+for(i in libload) {
+    library(i, character.only = T)
+}
+
+plan("multicore", workers = 6)
+plan()
+
+set.seed(7)
+```
+
+```{r loaddata,eval=T,echo=F}
+
+fgseaResults <- readRDS(proot$find_file(config$outputpath, "data", "gsea_nebula_cond_cpc-0.005_monocle_Stem-TA_ref_regress-cc_2024-03-21.rds"))
+pathwaySelection <- read.csv(
+    proot$find_file(config$outputpath, "metadata", "pathway_selection_condition_2024-04-24.csv")
+)
+
+```
+
+```{r prepare_pathway_data, eval=T, echo=F, results='asis'}
+
+rownames(pathwaySelection) <- pathwaySelection$gene_set_id
+pathwaySelection$biological_process <- factor(
+    pathwaySelection$biological_process,
+    levels = unique(pathwaySelection$biological_process)
+)
+
+relevantComparisons <- c(
+    "WT_DAT_vs_WT_Ctrl",
+    "GT_DAT_vs_GT_Ctrl"
+)
+comparisonLabels <- c(
+    "WT-DAT",
+    "GT-DAT"
+)
+names(comparisonLabels) <- relevantComparisons
+
+fgseaResultsSelection <- list()
+fgseaResultsSelectionCombined <- data.frame()
+
+for (celltype in names(fgseaResults)) {
+    currFgseaResults <- fgseaResults[[celltype]] %>%
+        filter(pathway %in% pathwaySelection$gene_set_id) %>%
+        filter(comparison %in% relevantComparisons) %>%
+        inner_join(pathwaySelection, by = c("pathway" = "gene_set_id")) %>%
+        mutate(pathway = factor(pathway, levels = unique(pathwaySelection$gene_set_id))) %>%
+        select(!c("log2err", "leadingEdge", "ES")) %>%
+        mutate(neg_log10_padj_signed = (-1)*log10(padj_fdr)*sign(NES)) %>%
+        mutate(
+            biological_process = factor(
+                biological_process, levels = unique(pathwaySelection$biological_process)
+            )
+        ) %>%
+        arrange(comparison, biological_process, pathway)
+
+    fgseaResultsSelection[[celltype]] <- currFgseaResults
+
+    currFgseaResults[["celltype"]] <- celltype
+    fgseaResultsSelectionCombined <- rbind(fgseaResultsSelectionCombined, currFgseaResults)
+}
+
+fgseaResultsSelectionCombined$celltype <- factor(
+    fgseaResultsSelectionCombined$celltype,
+    levels = names(fgseaResults)
+)
+
+```
+
+# Heatmaps of adjusted p-values of pathway gene set enrichment
+
+The heatmap tiles show the negative log10 of the FDR-adjusted p-values, multiplied by
++1 or -1 depending the direction of the regulation (downregulation is negative,
+upregulation is positive). The scale of signed log10 p-values has been cut at -3 and 3 to be able
+to better depict p-values falling into that range.
+
+```{r heatmap_pheatmap, eval=T, echo=F, results='asis', fig.dim=c(16, 12)}
+
+fgseaResultsSelectionPivot <- list()
+
+for (celltype in names(fgseaResults)) {
+    currPivot <- pivot_wider(
+        fgseaResultsSelection[[celltype]],
+        id_cols = "pathway",
+        names_from = "comparison",
+        values_from = "neg_log10_padj_signed"
+    )
+    currPivot <- as.data.frame(currPivot)
+
+    rownames(currPivot) <- currPivot$pathway
+    currPivot$pathway <- NULL
+
+    fgseaResultsSelectionPivot[[celltype]] <- currPivot
+}
+
+for (celltype in names(fgseaResults)) {
+    currPivot <- fgseaResultsSelectionPivot[[celltype]]
+    maxVal <- max(abs(currPivot))
+
+    cat(paste0("## Celltype: ", celltype))
+    cat("\n\n")
+
+    pheatmap(
+        currPivot,
+        color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdBu")))(100),
+        cluster_rows = FALSE,
+        cluster_cols = FALSE,
+        breaks = seq(-3, 3, length.out = 100),
+        annotation_row = pathwaySelection[, "biological_process", drop = FALSE],
+        angle_col = 45
+    )
+
+    cat("\n\n")
+}
+
+```
+
+# Dot heatmaps of adjusted p-values and NES of pathway gene set enrichment, coloring by p-value
+
+```{r heatmap_ggplot_dots, eval=T, echo=F, results='asis', fig.dim=c(9.5, 7)}
+
+dotHeatmapsPval <- list()
+
+for (celltype in names(fgseaResults)) {
+    labels <- ggplot(
+        fgseaResultsSelection[[celltype]],
+        aes(x = 1, y = pathway, fill = biological_process)
+    ) + geom_tile() +
+    scale_y_discrete(limits = rev) +
+    labs(fill = "Biological process") +
+    theme(
+        legend.position = "left",
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_blank()
+    )
+
+    dotHeatmapPval <- ggplot(
+        fgseaResultsSelection[[celltype]],
+        aes(x = comparison, y = pathway, color = neg_log10_padj_signed, size = abs(NES))
+    ) + geom_point() +
+    scale_color_distiller(palette = "RdBu", limits = c(-3, 3), oob = scales::squish) +
+    scale_size(range = c(1, 12), limits = c(0.5, 3), breaks = c(1, 1.5, 2, 2.5)) +
+    scale_y_discrete(limits = rev) +
+    scale_x_discrete(
+        name = "Condition",
+        breaks = relevantComparisons,
+        labels = comparisonLabels
+    ) +
+    labs(color = "-log10(q), signed", size = "NES, absolute") +
+    theme_bw() +
+    theme(
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.border = element_blank()
+    )
+
+    dotHeatmapsPval[[celltype]] <- labels + dotHeatmapPval + guide_area() + plot_layout(ncol = 3, widths = c(1, 6, 6), guides = "collect")
+
+    cat(paste0("## Celltype: ", celltype))
+    cat("\n\n")
+
+    print(dotHeatmapsPval[[celltype]])
+    cat("\n\n")
+}
+
+```
+
+# Dot heatmaps of adjusted p-values and NES of pathway gene set enrichment, coloring by NES
+
+```{r heatmap_ggplot_dots_nes, eval=T, echo=F, results='asis', fig.dim=c(9.5, 7)}
+
+dotHeatmapsNes <- list()
+
+for (celltype in names(fgseaResults)) {
+    labels <- ggplot(
+        fgseaResultsSelection[[celltype]],
+        aes(x = 1, y = pathway, fill = biological_process)
+    ) + geom_tile() +
+    scale_y_discrete(limits = rev) +
+    labs(fill = "Biological process") +
+    theme(
+        legend.position = "left",
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_blank()
+    )
+
+    dotHeatmapNes <- ggplot(
+        fgseaResultsSelection[[celltype]],
+        aes(x = comparison, y = pathway, color = NES, size = (-1)*log10(padj_fdr))
+    ) + geom_point() +
+    scale_color_distiller(palette = "RdBu", limits = c(-3, 3), oob = scales::squish) +
+    scale_size_area(max_size = 12, limits = c(0, 3), breaks = c(1, 2, 3), oob = scales::squish) +
+    scale_y_discrete(limits = rev) +
+    scale_x_discrete(
+        name = "Condition",
+        breaks = relevantComparisons,
+        labels = comparisonLabels
+    ) +
+    labs(color = "NES", size = "-log10(q)") +
+    theme_bw() +
+    theme(
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.border = element_blank()
+    )
+
+    dotHeatmapsNes[[celltype]] <- labels + dotHeatmapNes + guide_area() + plot_layout(ncol = 3, widths = c(1, 6, 6), guides = "collect")
+
+    cat(paste0("## Celltype: ", celltype))
+    cat("\n\n")
+
+    print(dotHeatmapsNes[[celltype]])
+    cat("\n\n")
+}
+
+```
+
+# Dot heatmap of multiple celltypes, coloring by p-value
+
+```{r heatmap_ggplot_dots_combined_pval, eval=T, echo=F, results='asis', fig.dim=c(14, 7)}
+
+celltypesSelection <- c(
+    "Stem",
+    "Stem.TA",
+    "TA"
+)
+comparisonsSelection <- relevantComparisons
+
+labels <- ggplot(
+    fgseaResultsSelectionCombined,
+    aes(x = 1, y = pathway, fill = biological_process)
+) + geom_tile() +
+scale_y_discrete(limits = rev) +
+labs(fill = "Biological process") +
+theme(
+    legend.position = "left",
+    legend.text = element_text(size = 13),
+    legend.title = element_text(size = 15),
+    axis.title.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(size = 12),
+    panel.background = element_blank(),
+    panel.border = element_blank()
+)
+
+dotHeatmapCombinedPval <- ggplot(
+    fgseaResultsSelectionCombined %>%
+        filter(comparison %in% comparisonsSelection) %>%
+        filter(celltype %in% celltypesSelection),
+    aes(x = comparison, y = pathway, color = neg_log10_padj_signed, size = abs(NES))
+) + geom_point() + facet_wrap(vars(celltype), ncol = length(celltypesSelection)) +
+    scale_color_distiller(palette = "RdBu", limits = c(-3, 3), oob = scales::squish) +
+    scale_size(range = c(1, 11), limits = c(0.5, 3), breaks = c(1, 1.5, 2, 2.5)) +
+scale_y_discrete(limits = rev) +
+scale_x_discrete(
+    name = "Condition",
+    breaks = comparisonsSelection,
+    labels = comparisonLabels[comparisonsSelection]
+) +
+labs(color = "-log10(q), signed", size = "NES, absolute") +
+theme_bw() +
+theme(
+    axis.text.x = element_text(angle = 45, size = 12, margin = margin(t = 30)),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.border = element_blank(),
+    legend.text = element_text(size = 13),
+    legend.title = element_text(size = 15),
+    strip.background = element_rect(
+        fill = NA,
+        color = NA
+    ),
+    strip.text.x = element_text(size = 15, face = "bold")
+)
+
+dotHeatmapCombinedPvalGrid <- labels + dotHeatmapCombinedPval + guide_area() + plot_layout(ncol = 3, widths = c(1, 12, 6), guides = "collect")
+
+dotHeatmapCombinedPvalGrid
+
+```
+
+# Dot heatmap of multiple celltypes, coloring by NES
+
+```{r heatmap_ggplot_dots_combined_nes, eval=T, echo=F, results='asis', fig.dim=c(14, 7)}
+
+labels <- ggplot(
+    fgseaResultsSelectionCombined,
+    aes(x = 1, y = pathway, fill = biological_process)
+) + geom_tile() +
+scale_y_discrete(limits = rev) +
+labs(fill = "Biological process") +
+theme(
+    legend.position = "left",
+    legend.text = element_text(size = 13),
+    legend.title = element_text(size = 15),
+    axis.title.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(size = 12),
+    panel.background = element_blank(),
+    panel.border = element_blank()
+)
+
+dotHeatmapCombinedNes <- ggplot(
+    fgseaResultsSelectionCombined %>%
+        filter(comparison %in% comparisonsSelection) %>%
+        filter(celltype %in% celltypesSelection),
+    aes(x = comparison, y = pathway, color = NES, size = (-1)*log10(padj_fdr))
+) + geom_point() + facet_wrap(vars(celltype), ncol = length(celltypesSelection)) +
+    scale_color_distiller(palette = "RdBu", limits = c(-3, 3), oob = scales::squish) +
+    scale_size_area(max_size = 11, limits = c(0, 3), breaks = c(1, 2, 3), oob = scales::squish) +
+scale_y_discrete(limits = rev) +
+scale_x_discrete(
+    name = "Condition",
+    breaks = comparisonsSelection,
+    labels = comparisonLabels[comparisonsSelection]
+) +
+labs(color = "NES", size = "-log10(q)") +
+theme_bw() +
+theme(
+    axis.text.x = element_text(angle = 45, size = 12, margin = margin(t = 30)),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.border = element_blank(),
+    legend.text = element_text(size = 13),
+    legend.title = element_text(size = 15),
+    strip.background = element_rect(
+        fill = NA,
+        color = NA
+    ),
+    strip.text.x = element_text(size = 15, face = "bold")
+)
+
+dotHeatmapCombinedNesGrid <- labels + dotHeatmapCombinedNes + guide_area() + plot_layout(ncol = 3, widths = c(1, 12, 6), guides = "collect")
+
+dotHeatmapCombinedNesGrid
+
+```
+
+```{r save_data, eval=saveData, echo=F}
+
+plotPathHeatmaps <- proot$find_file(config$outputpath, "fig", "monocle_Stem-TA_ref_regress-cc", "pathway_heatmaps")
+
+## Combined dot heatmaps
+
+# Coloring by p-value
+
+ggsave(
+    file.path(plotPathHeatmaps, "pathway_dot_heatmap_pval.pdf"),
+    dotHeatmapCombinedPvalGrid,
+    width = 14,
+    height = 7,
+    dpi = 300
+)
+
+ggsave(
+    file.path(plotPathHeatmaps, "pathway_dot_heatmap_pval.png"),
+    dotHeatmapCombinedPvalGrid,
+    width = 14,
+    height = 7,
+    dpi = 300
+)
+
+# Coloring by NES
+
+ggsave(
+    file.path(plotPathHeatmaps, "pathway_dot_heatmap_NES.pdf"),
+    dotHeatmapCombinedNesGrid,
+    width = 14,
+    height = 7,
+    dpi = 300
+)
+
+ggsave(
+    file.path(plotPathHeatmaps, "pathway_dot_heatmap_NES.png"),
+    dotHeatmapCombinedNesGrid,
+    width = 14,
+    height = 7,
+    dpi = 300
+)
+
+## Dot heatmaps, single celltype
+
+for (celltype in names(fgseaResults)) {
+    ggsave(
+        file.path(
+            plotPathHeatmaps,
+            paste0("pathway_dot_heatmap_pval_", celltype, ".pdf")
+        ),
+        dotHeatmapsPval[[celltype]],
+        width = 9.5,
+        height = 7,
+        dpi = 300
+    )
+
+    ggsave(
+        file.path(
+            plotPathHeatmaps,
+            paste0("pathway_dot_heatmap_NES_", celltype, ".pdf")
+        ),
+        dotHeatmapsNes[[celltype]],
+        width = 9.5,
+        height = 7,
+        dpi = 300
+    )
+}
+
+```
+
+# SessionInfo
+
+```{r sessionInfo}
+
+sessionInfo()
+
+```
+

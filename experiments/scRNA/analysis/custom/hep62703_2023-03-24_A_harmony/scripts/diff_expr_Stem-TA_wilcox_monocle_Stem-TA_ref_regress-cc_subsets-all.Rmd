@@ -1,0 +1,169 @@
+---
+title: "Differential expression between celltypes"
+subtitle: "Wilcox test (Seurat)"
+author: "Paul Heinrich"
+output: 
+    html_document:
+        toc: true
+---
+
+```{r setup1, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.dim = c(10, 10))
+```
+
+# Notes
+
+Reference single cell dataset from "A single-cell survey of the small intestinal epithelium"
+(Haber et al., 2017, Nature), available at NCBI GEO (https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE92332).
+
+```{r setup2,echo=FALSE, warning=FALSE, message=FALSE}
+#rbioc_3-14
+library(rprojroot)
+library(yaml)
+library(knitr)
+
+saveData <- TRUE
+
+root_criterion <- ".projroot"
+proot <- rprojroot::has_file(root_criterion)
+
+source(proot$find_file("experiments/scRNA/analysis/custom/functions/custom_functions.R"))
+
+params <- list()
+params$config <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/config.yaml")
+params$analparams <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/analparams_preprocessing_filters_2023-03-24.yaml")
+params$date <- Sys.Date()
+
+config <- yaml.load_file(proot$find_file(params$config))
+analparams <- yaml.load_file(proot$find_file(params$analparams))
+today <- params$date
+
+print(today)
+
+# libraries
+
+libload <- c(
+    "Seurat", "ggplot2", "harmony", "Nebulosa", "future",
+    "WriteXLS", "knitr", "stringr", "dplyr", "tidyr"
+)
+
+for(i in libload) {
+    library(i, character.only = T)
+}
+
+# Parallelization with future
+
+plan("multicore", workers = 6)
+plan()
+
+set.seed(7)
+
+```
+
+```{r loaddata,eval=T,echo=F}
+
+identCol <- "annot_SingleR_mod_monocle_Stem.TA_ref_regress.cc_subsets_all"
+
+SObj <- readRDS(proot$find_file(analparams$Seurat_clustered))
+Idents(SObj) <- SObj[[identCol]]
+
+```
+
+```{r diff_expr, eval=T, echo=F}
+
+comparisons <- list(
+    c("Stem.TA.1", "Stem.TA.other"),
+    c("Stem.TA.2", "Stem.TA.other"),
+    c("Stem.TA.3", "Stem.TA.other"),
+    c("Stem.TA.4", "Stem.TA.other"),
+    c("TA.1", "TA.other"),
+    c("TA.2", "TA.other"),
+    c("TA.3", "TA.other"),
+    c("Stem.TA.3", "Stem.TA.1"),
+    c("TA.3", "TA.1"),
+    c("TA.3", "TA.2"),
+    c("TA.1", "TA.2"),
+    c("Stem.TA.1", "Stem.TA.mid"),
+    c("Stem.TA.3", "Stem.TA.mid")
+)
+names(comparisons) <- sapply(comparisons, function(x) paste(x, collapse = "_vs_"))
+
+SObj$annot_monocle_Stem.TA.mid <- SObj@meta.data[[identCol]]
+SObj$annot_monocle_Stem.TA.mid[
+    SObj$annot_monocle_Stem.TA.mid %in% c("Stem.TA.2", "Stem.TA.4")
+] <- "Stem.TA.mid"
+
+diffExpr <- list()
+
+for (comparison in names(comparisons)) {
+    print(Sys.time())
+    print(paste0("Comparison: ", comparison))
+
+    currComparison <- comparisons[[comparison]]
+    SObj$temporary_ident <- SObj@meta.data[[identCol]]
+
+    if (grepl("other$", currComparison[2])) {
+        identPrefix <- stringr::str_remove(currComparison[2], "\\.other$")
+        SObj$temporary_ident[grepl(paste0("^", identPrefix), SObj$temporary_ident)] <- currComparison[2]
+        SObj$temporary_ident[SObj@meta.data[[identCol]] == currComparison[1]] <- currComparison[1]
+    }
+
+    if (grepl("mid$", currComparison[2])) {
+        SObj$temporary_ident <- SObj$annot_monocle_Stem.TA.mid
+    }
+
+    Idents(SObj) <- SObj$temporary_ident
+
+    diffExpr[[comparison]] <- FindMarkers(
+        SObj,
+        ident.1 = currComparison[1],
+        ident.2 = currComparison[2],
+        test.use = "wilcox",
+        only.pos = FALSE,
+        min.pct = 0.01,
+        logfc.threshold = -Inf,
+        return.thresh = 1,
+    )
+    diffExpr[[comparison]]$p_val_adj_fdr <- p.adjust(diffExpr[[comparison]]$p_val, method = "fdr")
+}
+
+SObj$temporary_ident <- NULL
+SObj$annot_monocle_Stem.TA.mid <- NULL
+
+fractionBelowThreshold <- c()
+threshold <- 0.05
+
+for (comparison in names(comparisons)) {
+    fractionBelowThreshold[comparison] <- sum(diffExpr[[comparison]]$p_val <= threshold)/
+    length(diffExpr[[comparison]]$p_val)
+}
+
+print(fractionBelowThreshold)
+
+```
+
+```{r save_data, echo=FALSE, warning=FALSE, eval=saveData}
+
+commonFilename <- paste0("diff_expr_Stem-TA_wilcox_monocle_Stem-TA_ref_regress-cc_subsets-all_", today)
+
+saveRDS(
+    diffExpr,
+    proot$find_file(config$outputpath, "data", paste0(commonFilename, ".rds"))
+)
+
+WriteXLS(
+    lapply(diffExpr, function(x) tibble::rownames_to_column(x, "gene")),
+    proot$find_file(config$outputpath, "table", paste0(commonFilename, ".xlsx")),
+)
+
+```
+
+# SessionInfo
+
+```{r sessionInfo}
+
+sessionInfo()
+
+```
+

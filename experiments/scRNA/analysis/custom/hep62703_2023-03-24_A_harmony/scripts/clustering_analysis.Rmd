@@ -1,0 +1,168 @@
+---
+title: "Clustering analysis"
+author: "Paul Heinrich"
+output: 
+    html_document:
+        toc: true
+---
+
+```{r setup1, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.dim = c(8, 8))
+```
+
+# Notes
+
+```{r setup2,echo=FALSE, warning=FALSE}
+#rbioc_3-14
+library(rprojroot)
+library(yaml)
+library(knitr)
+
+root_criterion <- ".projroot"
+proot <- rprojroot::has_file(root_criterion)
+
+source(proot$find_file("experiments/scRNA/analysis/custom/functions/custom_functions.R"))
+
+params <- list()
+params$config <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/config.yaml")
+params$analparams <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/analparams_preprocessing_filters_2023-03-24.yaml")
+params$date <- Sys.Date()
+
+config <- yaml.load_file(proot$find_file(params$config))
+analparams <- yaml.load_file(proot$find_file(params$analparams))
+
+# libraries
+libload <- c(
+    "Seurat","ggplot2", "harmony", "Nebulosa", "future",
+    "WriteXLS", "knitr", "stringr", "dplyr", "tidyr"
+)
+
+for(i in libload) {
+    library(i, character.only = T)
+}
+
+plan("multicore", workers = 6)
+plan()
+
+# bibliography
+
+try(
+    knitr::write_bib(
+        c(.packages()),
+        proot$find_file(config$outputpath, "references/R.bib")
+    )
+)
+
+set.seed(7)
+```
+
+```{r loaddata,eval=T,echo=F}
+
+SObj <- readRDS(proot$find_file(analparams$Seurat_clustered))
+
+clusteringResolutions <- str_extract(colnames(SObj@meta.data)[grepl("RNA_snn_res\\.[0-9]+", colnames(SObj@meta.data))], "[0-9](\\.[0-9])?")
+
+```
+
+# Cluster fraction tables
+
+```{r cluster_fraction_tables, eval=T, echo=F, results='asis'}
+
+clusterFractionTables <- list()
+
+for (res in clusteringResolutions) {
+    clusterFractionTables[[res]] <- getClusterFractionTables(
+        SObj,
+        batchCol = "orig.ident",
+        groupCol = "group",
+        clusterCol = paste0("RNA_snn_res.", res)
+    )
+}
+
+fractionTypes <- c("group", "batch")
+
+for (res in clusteringResolutions) {
+    print(paste0("Clustering resolution: ", res))
+    cat("\n")
+    for (fractionType in fractionTypes) {
+        print(paste0("Fractions for: ", fractionType))
+        cat("\n")
+        print(kable(clusterFractionTables[[res]][["pivot"]][[fractionType]][["cluster"]]))
+        cat("\n")
+        print(kable(clusterFractionTables[[res]][["pivot"]][[fractionType]][[fractionType]]))
+        cat("\n")
+    }
+}
+
+```
+
+# UMAP plots of clusters
+
+## All cells, splitting by group or batch
+
+```{r umap_plots_prepare, eval=T, echo=F}
+
+umapDimPlots <- list()
+
+SObj[["batch_condition"]] <- paste(SObj@meta.data$orig.ident, SObj@meta.data$group, sep = "_")
+groups <- unique(SObj$group)
+
+for (res in clusteringResolutions) {
+    umapDimPlots[[res]] <- list()
+
+    umapDimPlots[[res]][["all"]] <- DimPlot(SObj, group.by = paste0("RNA_snn_res.", res), reduction = "umap")
+    umapDimPlots[[res]][["by_batch"]] <- DimPlot(SObj, group.by = paste0("RNA_snn_res.", res), split.by = "orig.ident", reduction = "umap")
+    umapDimPlots[[res]][["by_condition"]] <- DimPlot(SObj, group.by = paste0("RNA_snn_res.", res), split.by = "group", reduction = "umap")
+
+    currGroupPlots <- list() 
+
+    for (group in groups) {
+        cellsSelected <- rownames(SObj@meta.data)[SObj@meta.data$group == group]
+        SObjSubset <- subset(SObj, cells = cellsSelected)
+
+        currGroupPlots[[group]] <- DimPlot(
+            SObjSubset,
+            group.by = paste0("RNA_snn_res.", res),
+            split.by = "orig.ident",
+            reduction = "umap"
+        ) + labs(title = group, subtitle = NULL)
+    }
+
+    umapDimPlots[[res]][["by_batch_condition"]] <- wrap_plots(currGroupPlots, ncol = 1, nrow = length(currGroupPlots)) +
+        plot_layout(guides = "collect")
+}
+
+```
+
+```{r umap_plots_1, eval=T, echo=F}
+
+for (res in clusteringResolutions) {
+    print(paste0("Clustering resolution: ", res))
+    for (split in names(umapDimPlots[[res]])[1:3]) {
+        print(paste0("Current split: ", split))
+        print(umapDimPlots[[res]][[split]])
+    }
+}
+
+```
+
+## Splitting by group and batch
+
+```{r umap_plots_2, eval=T, echo=F, fig.dim=c(12, 16)}
+
+for (res in clusteringResolutions) {
+    print(paste0("Clustering resolution: ", res))
+    print(umapDimPlots[[res]][["by_batch_condition"]])
+}
+
+```
+
+# SessionInfo
+
+```{r sessionInfo}
+
+sessionInfo()
+
+```
+

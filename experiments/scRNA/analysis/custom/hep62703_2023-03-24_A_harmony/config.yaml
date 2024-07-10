@@ -1,0 +1,11 @@
+# Cellhashing:
+cellhash: TRUE #TRUE or FALSE
+
+# Input and Output path
+# realitve path to cellranger output: if runs have to be fused, "cellranger count" has to be used on all fastq. Example: "experiments/scRNA/analyses/cellranger_20220608_HWGG5BGXL"
+inputpath: experiments/scRNA/analysis/cellranger_20230320
+# relative path to output location. Example:" experiments/scRNA/analyses/custom_analysis/NMS07062022"
+outputpath: experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony
+
+# Set species: e.g. "homo sapiens","mus musculus"
+species: "mus musculus"

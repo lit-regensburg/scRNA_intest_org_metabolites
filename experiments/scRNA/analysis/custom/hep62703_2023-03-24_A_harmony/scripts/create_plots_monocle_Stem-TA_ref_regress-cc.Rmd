@@ -1,0 +1,1695 @@
+---
+title: "Plots for analysis with Monocle categorization of Stem-TA subset"
+author: "Paul Heinrich"
+output: 
+    html_document:
+        toc: true
+---
+
+```{r setup1, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Notes
+
+```{r setup2,echo=FALSE, warning=FALSE}
+#rbioc_3-14
+library(rprojroot)
+library(yaml)
+library(knitr)
+
+saveData <- TRUE
+
+root_criterion <- ".projroot"
+proot <- rprojroot::has_file(root_criterion)
+
+source(proot$find_file("experiments/scRNA/analysis/custom/functions/custom_functions.R"))
+
+params <- list()
+params$config <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/config.yaml")
+params$analparams <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/analparams_preprocessing_filters_2023-03-24.yaml")
+params$date <- Sys.Date()
+
+config <- yaml.load_file(proot$find_file(params$config))
+analparams <- yaml.load_file(proot$find_file(params$analparams))
+today <- params$date
+
+print(today)
+
+# Set params
+
+clusterCol <- "RNA_snn_res.0.8"
+refName <- "Haber_2017"
+annotColSingleR <- "annot_SingleR_mod"
+annotCol <- "annot_SingleR_mod_monocle_Stem.TA_ref_regress.cc"
+annotColSubsets <- "annot_SingleR_mod_monocle_Stem.TA_ref_regress.cc_subsets_all"
+
+# libraries
+libload <- c(
+    "Seurat","ggplot2", "harmony", "Nebulosa", "future",
+    "WriteXLS", "knitr", "stringr", "dplyr", "monocle", "SingleR",
+    "pheatmap", "viridis", "grid"
+)
+
+for(i in libload) {
+    library(i, character.only = T)
+}
+
+plan("multicore", workers = 6)
+plan()
+
+set.seed(7)
+
+```
+
+```{r loaddata,eval=T,echo=F}
+
+SObj <- readRDS(proot$find_file(analparams$Seurat_clustered))
+SObjSubset <- readRDS(proot$find_file(config$outputpath, "data", "SeuratObj_reclustered_SingleR-Stem-TA_2023-04-19.rds"))
+monoObj <- readRDS(proot$find_file(config$outputpath, "data", "monocle_Stem-TA_ref_regress-cc_2024-03-20.rds"))
+labelsSingleR <- readRDS(
+    proot$find_file(
+        config$outputpath, "data",
+        paste0("annot_SingleR_", refName, ".rds")
+    )
+)
+
+```
+
+```{r prepare_data, eval=T, echo=F}
+
+relevantCelltypes <- c(
+    "Stem",
+    "Stem.TA",
+    "TA",
+    "Enterocyte.Progenitor",
+    "Enterocyte",
+    "Endocrine",
+    "Goblet.Paneth",
+    "Tuft"
+)
+relevantCelltypesSingleR <- c(
+    "Stem",
+    "TA",
+    "Enterocyte.Progenitor",
+    "Enterocyte",
+    "Endocrine",
+    "Goblet.Paneth",
+    "Tuft"
+)
+relevantCelltypesSingleROrig <- c(
+    "Stem",
+    "TA",
+    "Enterocyte.Progenitor",
+    "Enterocyte",
+    "Endocrine",
+    "Goblet",
+    "Paneth",
+    "Tuft"
+)
+relevantCelltypesSubsets <- c(
+    "Stem",
+    "Stem.TA.1",
+    "Stem.TA.2",
+    "Stem.TA.3",
+    "Stem.TA.4",
+    "TA.1",
+    "TA.2",
+    "TA.3",
+    "Enterocyte.Progenitor",
+    "Enterocyte",
+    "Endocrine",
+    "Goblet.Paneth",
+    "Tuft"
+)
+
+relevantCelltypesLabels <- relevantCelltypes
+names(relevantCelltypesLabels) <- relevantCelltypes
+relevantCelltypesLabels["Stem"] <- "ISC"
+relevantCelltypesLabels["Stem.TA"] <- "ISC II"
+
+relevantCelltypesSingleRLabels <- relevantCelltypesSingleR
+names(relevantCelltypesSingleRLabels) <- relevantCelltypesSingleR
+relevantCelltypesSingleRLabels["Stem"] <- "ISC"
+
+relevantCelltypesSubsetsLabels <- relevantCelltypesSubsets
+names(relevantCelltypesSubsetsLabels) <- relevantCelltypesSubsets
+relevantCelltypesSubsetsLabels["Stem"] <- "ISC"
+relevantCelltypesSubsetsLabels <- gsub(
+    "^Stem.TA", "ISC II", relevantCelltypesSubsetsLabels
+)
+
+groups <- sort(unique(SObj$group))
+groups <- c(groups[4:6], groups[1:3])
+
+SObj@meta.data[[annotColSingleR]] <- factor(
+    SObj@meta.data[[annotColSingleR]],
+    levels = relevantCelltypesSingleR
+)
+SObj@meta.data[[annotCol]] <- factor(
+    SObj@meta.data[[annotCol]],
+    levels = relevantCelltypes
+)
+
+# Monocle-based annotation of Stem-TA subset
+
+pData(monoObj)[[annotCol]] <- SObj@meta.data[rownames(pData(monoObj)), annotCol]
+pData(monoObj)[[annotColSubsets]] <- SObj@meta.data[rownames(pData(monoObj)), annotColSubsets]
+SObjSubset@meta.data[[annotCol]] <- SObj@meta.data[rownames(SObjSubset@meta.data), annotCol]
+
+# Pseudotime
+
+SObjSubset@meta.data[rownames(pData(monoObj)), "Pseudotime"] <- pData(monoObj)[["Pseudotime"]]
+
+# Density dummy column
+
+SObj@meta.data[["density"]] <- 1
+SObjSubset@meta.data[["density"]] <- 1
+
+# Module and UCell scores
+
+SObj$Diff_G2M_phase_S_phase_UCell <- SObj$G2M_phase_UCell - SObj$S_phase_UCell
+
+scoreCols <- grep("(^MS_)|(_UCell$)", colnames(SObj@meta.data), value = TRUE)
+SObjSubset@meta.data[, scoreCols] <- SObj@meta.data[rownames(SObjSubset@meta.data), scoreCols]
+pData(monoObj)[, scoreCols] <- SObj@meta.data[rownames(pData(monoObj)), scoreCols]
+
+# Normalized counts
+
+normCounts <- GetAssayData(SObj, assay = "RNA", slot = "data")
+
+```
+
+```{r define_palettes, eval=T,echo=F}
+
+clusters <- levels(SObj@meta.data[[clusterCol]])
+paletteClusters <- scales::hue_pal()(length(clusters))
+names(paletteClusters) <- clusters
+
+annots <- levels(SObj@meta.data[[annotColSingleR]])
+paletteAnnotsSingleR <- scales::hue_pal()(length(annots))
+names(paletteAnnotsSingleR) <- sort(annots)
+paletteAnnotsSingleR <- paletteAnnotsSingleR[annots]
+
+paletteAnnotsSingleROrig <- paletteAnnotsSingleR[
+    names(paletteAnnotsSingleR) %in% relevantCelltypesSingleROrig
+]
+paletteAnnotsSingleROrig["Goblet"] <- "#00C094"
+paletteAnnotsSingleROrig["Paneth"] <- "#FFD92F"
+paletteAnnotsSingleROrig <- paletteAnnotsSingleROrig[relevantCelltypesSingleROrig]
+
+paletteAnnots <- paletteAnnotsSingleR
+paletteAnnots["Stem.TA"] <- "#996633" # "#c78118"
+paletteAnnots <- paletteAnnots[relevantCelltypes]
+
+```
+
+# UMAP plots of all cells
+
+## Category plots of all cells
+
+```{r umap_plots, eval=T, echo=F}
+
+umapPlotClusters <- DimPlot(SObj, group.by = clusterCol) +
+    scale_color_manual(
+        breaks = names(paletteClusters),
+        values = paletteClusters
+    ) + labs(title = "Clustering")
+
+umapPlotAnnotSingleR <- DimPlot(SObj, group.by = annotColSingleR) +
+    scale_color_manual(
+        breaks = names(paletteAnnotsSingleR),
+        values = paletteAnnotsSingleR,
+        labels = relevantCelltypesSingleRLabels
+    ) + labs(title = "SingleR cell type annotation")
+
+umapPlotAnnot <- DimPlot(SObj, group.by = annotCol) +
+    scale_color_manual(
+        breaks = names(paletteAnnots),
+        values = paletteAnnots,
+        labels = relevantCelltypesLabels
+    ) + labs(title = "Cell type annotation")
+
+umapPlotDensity <- plot_density(SObj, features = "density")
+
+```
+
+## Category plots split by group
+
+```{r umap_plots_split_group, eval=T, echo=F, fig.dim=c(15, 25), results='asis'}
+
+SObjSplitGroup <- SplitObject(SObj, split.by = "group")
+
+umapPlotsGroupAnnot <- list()
+umapPlotsGroupCluster <- list()
+umapPlotsGroupDensity <- list()
+
+for (group in groups) {
+    umapPlotsGroupCluster[[group]] <- DimPlot(SObjSplitGroup[[group]], group.by = clusterCol) +
+        scale_color_manual(
+            breaks = names(paletteClusters),
+            values = paletteClusters
+        ) +
+        labs(title = group)
+
+    umapPlotsGroupAnnot[[group]] <- DimPlot(SObjSplitGroup[[group]], group.by = annotCol) +
+        scale_color_manual(
+            breaks = names(paletteAnnots),
+            values = paletteAnnots,
+            labels = relevantCelltypesLabels
+        ) +
+        labs(title = group)
+
+    umapPlotsGroupDensity[[group]] <- plot_density(SObjSplitGroup[[group]], "density") +
+        scale_color_viridis(limits = c(0, 0.025), oob = scales::squish) +
+        labs(title = group)
+}
+
+umapPlotsGroupClusterComb <- wrap_plots(
+    umapPlotsGroupCluster,
+    ncol = 2,
+    nrow = ceiling(length(groups)/2),
+    guides = "collect"
+)
+
+umapPlotsGroupAnnotComb <- wrap_plots(
+    umapPlotsGroupAnnot,
+    ncol = 2,
+    nrow = ceiling(length(groups)/2),
+    guides = "collect"
+)
+
+umapPlotsGroupDensityComb <- wrap_plots(
+    umapPlotsGroupDensity,
+    ncol = 2,
+    nrow = ceiling(length(groups)/2),
+    guides = "collect"
+)
+
+```
+
+## Category plots split by library
+
+```{r umap_plots_split_lib, eval=T, echo=F, fig.dim=c(15, 15), results='asis'}
+
+libs <- sort(unique(SObj$orig.ident))
+libNameMapping <- str_replace_all(libs, "-2$", "")
+names(libNameMapping) <- libs
+
+SObjSplitLib <- SplitObject(SObj, split.by = "orig.ident")
+
+umapPlotsLibAnnot <- list()
+umapPlotsLibCluster <- list()
+umapPlotsLibDensity <- list()
+
+for (lib in libs) {
+    umapPlotsLibCluster[[lib]] <- DimPlot(SObjSplitLib[[lib]], group.by = clusterCol) +
+        scale_color_manual(values = paletteClusters) +
+        labs(title = libNameMapping[[lib]])
+
+    umapPlotsLibAnnot[[lib]] <- DimPlot(SObjSplitLib[[lib]], group.by = annotCol) +
+        scale_color_manual(values = paletteAnnots, labels = relevantCelltypesLabels) +
+        labs(title = libNameMapping[[lib]])
+
+    umapPlotsLibDensity[[lib]] <- plot_density(SObjSplitLib[[lib]], "density") +
+        scale_color_viridis(limits = c(0, 0.025), oob = scales::squish) +
+        labs(title = libNameMapping[[lib]])
+}
+
+umapPlotsLibClusterComb <- wrap_plots(
+    umapPlotsLibCluster,
+    ncol = 2,
+    nrow = ceiling(length(libs)/2),
+    guides = "collect"
+)
+
+umapPlotsLibAnnotComb <- wrap_plots(
+    umapPlotsLibAnnot,
+    ncol = 2,
+    nrow = ceiling(length(libs)/2),
+    guides = "collect"
+)
+
+umapPlotsLibDensityComb <- wrap_plots(
+    umapPlotsLibDensity,
+    ncol = 2,
+    nrow = ceiling(length(libs)/2),
+    guides = "collect"
+)
+
+```
+
+## Marker plots
+
+```{r umap_plots_markers, eval=T, echo=F, results='asis', fig.dim=c(10, 10)}
+
+markersStem <- c(
+    "Lgr5",
+    "Olfm4"
+)
+markersDiffCelltypes <- c(
+    "Alpi",
+    "Apoa1"
+)
+markersAllCells <- c(markersStem, markersDiffCelltypes)
+
+umapPlotsMarkers <- list()
+
+for (marker in markersAllCells) {
+    umapPlotsMarkers[[marker]] <- FeaturePlot(SObj, features = marker) +
+    scale_color_distiller(palette = "RdYlBu", type = "div", name = NULL)
+}
+
+umapPlotsMarkersComb <- wrap_plots(
+    umapPlotsMarkers,
+    ncol = 2,
+    nrow = ceiling(length(markersAllCells)/2)
+)
+
+```
+
+## Marker score plots
+
+```{r umap_plots_marker_scores, eval=T, echo=F, results='asis', fig.dim=c(10, 10)}
+
+markersScoresStemCC <- c(
+    "Stem_UCell",
+    "Cell_cycle_UCell",
+    "S_phase_UCell",
+    "G2M_phase_UCell"
+)
+markersScoresDiffCelltypes <- c(
+    "Enterocyte_UCell",
+    "Goblet_UCell",
+    "Paneth_UCell",
+    "Enteroendocrine_UCell"
+)
+markerScoresAllCells <- c(markersScoresStemCC, markersScoresDiffCelltypes)
+
+umapPlotsMarkerScores <- list()
+
+for (markerScore in markerScoresAllCells) {
+    umapPlotsMarkerScores[[markerScore]] <- FeaturePlot(SObj, features = markerScore) +
+    scale_color_distiller(palette = "RdYlBu", type = "div", name = NULL)
+}
+
+umapPlotsMarkersScoresCombStemCC <- wrap_plots(
+    umapPlotsMarkerScores[markersScoresStemCC],
+    ncol = 2,
+    nrow = ceiling(length(markersScoresStemCC)/2)
+)
+umapPlotsMarkersScoresCombDiffCelltypes <- wrap_plots(
+    umapPlotsMarkerScores[markersScoresDiffCelltypes],
+    ncol = 2,
+    nrow = ceiling(length(markersScoresDiffCelltypes)/2)
+)
+
+```
+
+# UMAP plots of Stem-TA subset
+
+## Category plots
+
+```{r umap_plots_subset, eval=T, echo=F}
+
+celltypesAnnotSingleRInSubset <- names(paletteAnnotsSingleR)[
+    names(paletteAnnotsSingleR) %in% SObjSubset@meta.data[[annotColSingleR]]
+]
+
+umapPlotAnnotSingleRSubset <- DimPlot(SObjSubset, group.by = annotColSingleR) +
+    scale_color_manual(
+        breaks = celltypesAnnotSingleRInSubset,
+        values = paletteAnnotsSingleR,
+        labels = relevantCelltypesSingleRLabels[celltypesAnnotSingleRInSubset]
+    ) + labs(title = "SingleR annotation")
+
+celltypesAnnotInSubset <- names(paletteAnnots)[
+    names(paletteAnnots) %in% SObjSubset@meta.data[[annotCol]]
+]
+
+umapPlotAnnotSubset <- DimPlot(SObjSubset, group.by = annotCol) +
+    scale_color_manual(
+        breaks = celltypesAnnotInSubset,
+        values = paletteAnnots,
+        labels = relevantCelltypesLabels[celltypesAnnotInSubset]
+    ) + labs(title = "Annotation")
+
+umapPlotDensitySubset <- plot_density(SObjSubset, features = "density")
+
+umapPlotsAnnotSubsetComb <- umapPlotAnnotSingleRSubset + umapPlotAnnotSubset + plot_layout(ncol = 2)
+
+```
+
+## Stemness plots
+
+Stem cell markers, stem cell UCell score, Pseudotime
+
+```{r umap_plots_markers_subset, eval=T, echo=F, results='asis', fig.dim=c(10, 10)}
+
+featuresStemness <- c(
+    markersStem,
+    "Stem_UCell",
+    "Pseudotime"
+)
+
+umapPlotsStemSubset <- list()
+
+for (feature in featuresStemness) {
+    umapPlotsStemSubset[[feature]] <- FeaturePlot(SObjSubset, features = feature) +
+    scale_color_distiller(palette = "RdYlBu", type = "div", name = NULL)
+}
+
+umapPlotsStemSubsetComb <- wrap_plots(
+    umapPlotsStemSubset,
+    ncol = 2,
+    nrow = ceiling(length(featuresStemness)/2)
+)
+
+umapPlotsSubsetCombList <- umapPlotsStemSubset
+umapPlotsSubsetCombList[["SingleR"]] <- umapPlotAnnotSingleRSubset
+umapPlotsSubsetCombList[["annot"]] <- umapPlotAnnotSubset
+
+umapPlotsSubsetComb <- wrap_plots(
+    umapPlotsSubsetCombList,
+    ncol = 2,
+    nrow = ceiling(length(umapPlotsSubsetCombList)/2)
+)
+
+```
+
+## Density plots split by group
+
+```{r umap_plots_density_split_group, eval=T, echo=F, fig.dim=c(15, 25), results='asis'}
+
+SObjSubsetSplitGroup <- SplitObject(SObjSubset, split.by = "group")
+
+umapPlotsGroupDensitySubset <- list()
+
+for (group in groups) {
+    umapPlotsGroupDensitySubset[[group]] <- plot_density(SObjSubsetSplitGroup[[group]], "density") +
+        scale_color_viridis(limits = c(0, 0.025), oob = scales::squish) +
+        labs(title = group)
+}
+
+umapPlotsGroupDensitySubsetComb <- wrap_plots(
+    umapPlotsGroupDensitySubset,
+    ncol = 2,
+    nrow = ceiling(length(groups)/2),
+    guides = "collect"
+)
+
+```
+
+# Trajectory plots
+
+```{r trajectory_plots, eval=T, echo=F, fig.dim=c(15, 25), results='asis'}
+
+normCountsSubset <- normCounts[, rownames(pData(monoObj))]
+
+trajectoryPlotVarsDiscrete <- c(
+    "State",
+    "group",
+    "orig.ident"
+)
+trajectoryPlotVarsContinuous <- c(
+    "Pseudotime",
+    "Stem_UCell",
+    "Enterocyte_UCell",
+    "G2M_phase_UCell",
+    "S_phase_UCell",
+    "Cell_cycle_UCell",
+    "nCount_RNA",
+    "nFeature_RNA",
+    "percent.mt",
+    "percent.ribo"
+)
+trajectoryPlotMarkers <- markersStem
+
+trajectoryPlotVariables <- c(
+    trajectoryPlotVarsDiscrete,
+    trajectoryPlotVarsContinuous,
+    trajectoryPlotMarkers
+)
+
+trajectoryPlotNameMapping <- trajectoryPlotVariables
+names(trajectoryPlotNameMapping) <- trajectoryPlotVariables
+
+trajectoryPlotNameMapping[annotColSingleR] <- "annotation_SingleR"
+trajectoryPlotNameMapping[annotCol] <- "annotation"
+trajectoryPlotNameMapping[annotColSubsets] <- "annotation_subsets"
+trajectoryPlotNameMapping["orig.ident"] <- "lib"
+trajectoryPlotNameMapping["group"] <- "cond"
+
+trajectoryPlots <- list()
+
+celltypesAnnotSingleRInMonoObj <- names(paletteAnnotsSingleR)[
+    names(paletteAnnotsSingleR) %in% pData(monoObj)[[annotColSingleR]]
+]
+
+trajectoryPlots[[annotColSingleR]] <- plot_cell_trajectory(monoObj, color_by = annotColSingleR, cell_size = 1, show_branch_points = FALSE) +
+    scale_color_manual(
+        breaks = celltypesAnnotSingleRInMonoObj,
+        values = paletteAnnotsSingleR,
+        labels = relevantCelltypesSingleRLabels[celltypesAnnotSingleRInMonoObj],
+        name = NULL
+    ) + labs(title = "Annotation SingleR")
+
+celltypesAnnotInMonoObj <- names(paletteAnnots)[
+    names(paletteAnnots) %in% pData(monoObj)[[annotCol]]
+]
+
+trajectoryPlots[[annotCol]] <- plot_cell_trajectory(monoObj, color_by = annotCol, cell_size = 1, show_branch_points = FALSE) +
+    scale_color_manual(
+        breaks = celltypesAnnotInMonoObj,
+        values = paletteAnnots,
+        labels = relevantCelltypesLabels[celltypesAnnotInMonoObj],
+        name = NULL
+    ) + labs(title = "Annotation")
+
+celltypesAnnotSubsetsInMonoObj <- names(relevantCelltypesSubsetsLabels)[
+    names(relevantCelltypesSubsetsLabels) %in% pData(monoObj)[[annotColSubsets]]
+]
+
+trajectoryPlots[[annotColSubsets]] <- plot_cell_trajectory(monoObj, color_by = annotColSubsets, cell_size = 1, show_branch_points = FALSE) +
+    scale_color_discrete(
+        breaks = celltypesAnnotSubsetsInMonoObj,
+        labels = relevantCelltypesSubsetsLabels[celltypesAnnotSubsetsInMonoObj],
+        name = NULL
+    ) + labs(title = "Annotation subsets") + theme(legend.position = "right")
+
+for (variable in trajectoryPlotVarsDiscrete) {
+    trajectoryPlots[[variable]] <- plot_cell_trajectory(monoObj, color_by = variable, cell_size = 1, show_branch_points = FALSE) +
+        guides(color = guide_legend(title = NULL)) +
+        labs(title = trajectoryPlotNameMapping[variable])
+}
+for (variable in trajectoryPlotVarsContinuous) {
+    trajectoryPlots[[variable]] <- plot_cell_trajectory(monoObj, color_by = variable, cell_size = 1, show_branch_points = FALSE) +
+        scale_color_distiller(palette = "RdYlBu", type = "div", name = NULL) +
+        labs(title = trajectoryPlotNameMapping[variable])
+}
+for (marker in trajectoryPlotMarkers) {
+    pData(monoObj)[[marker]] <- normCountsSubset[marker, rownames(pData(monoObj))]
+    trajectoryPlots[[marker]] <- plot_cell_trajectory(monoObj, color_by = marker, cell_size = 1, show_branch_points = FALSE) +
+    scale_color_viridis(name = NULL) +
+    labs(title = trajectoryPlotNameMapping[marker])
+}
+
+for (feature in names(trajectoryPlots)) {
+    trajectoryPlots[[feature]] <- trajectoryPlots[[feature]] + theme(legend.position = "right")
+}
+
+trajectoryPlotsStem <- wrap_plots(
+    trajectoryPlots[featuresStemness],
+    ncol = 2,
+    nrow = ceiling(length(featuresStemness)/2)
+)
+
+featuresTrajectoryCombined <- c(featuresStemness, annotColSingleR, annotCol)
+trajectoryPlotsCombined <- wrap_plots(
+    trajectoryPlots[featuresTrajectoryCombined],
+    ncol = 2,
+    nrow = ceiling(length(featuresTrajectoryCombined)/2)
+)
+
+featuresMetab <- c(
+    "nCount_RNA",
+    "nFeature_RNA",
+    "percent.mt",
+    "percent.ribo"
+)
+trajectoryPlotsMetab <- wrap_plots(
+    trajectoryPlots[featuresMetab],
+    ncol = 2,
+    nrow = ceiling(length(featuresMetab)/2)
+)
+featuresCellcycle <- c(
+    "G2M_phase_UCell",
+    "S_phase_UCell",
+    "Cell_cycle_UCell"
+)
+trajectoryPlotsCellcycle <- wrap_plots(
+    trajectoryPlots[featuresCellcycle],
+    ncol = 2,
+    nrow = ceiling(length(featuresCellcycle)/2)
+)
+
+featuresCellcycleAnnotSubsets <- c(
+    "G2M_phase_UCell",
+    "S_phase_UCell",
+    annotColSubsets
+)
+trajectoryPlotsCellcycleAnnotSubsets <- wrap_plots(
+    trajectoryPlots[featuresCellcycleAnnotSubsets],
+    ncol = 2,
+    nrow = ceiling(length(featuresCellcycleAnnotSubsets)/2)
+)
+
+```
+
+# Violin plots
+
+```{r violin_plots, eval=T, echo=F}
+
+vlnPlotFeatures <- c(
+    "Lgr5",
+    "Olfm4",
+    "Stem_UCell"
+)
+
+vlnCelltypesSingleR <- relevantCelltypesSingleR[1:4]
+Idents(SObj) <- annotColSingleR
+
+vlnPlotsSingleR <- list()
+
+for (feature in vlnPlotFeatures) {
+    vlnPlotsSingleR[[feature]] <- VlnPlot(
+        SObj, group.by = annotColSingleR, features = feature,
+        idents = vlnCelltypesSingleR
+    ) +
+    scale_fill_manual(
+        breaks = vlnCelltypesSingleR,
+        values = paletteAnnotsSingleR[vlnCelltypesSingleR],
+        labels = relevantCelltypesSingleRLabels[vlnCelltypesSingleR]
+    ) +
+    scale_x_discrete(
+        name = NULL,
+        breaks = vlnCelltypesSingleR,
+        labels = NULL
+    ) +
+    labs(title = feature)
+}
+
+vlnCelltypesAnnot <- relevantCelltypes[1:5]
+Idents(SObj) <- annotCol
+
+vlnPlotsAnnot <- list()
+
+for (feature in vlnPlotFeatures) {
+    vlnPlotsAnnot[[feature]] <- VlnPlot(
+        SObj, group.by = annotCol, features = feature,
+        idents = vlnCelltypesAnnot
+    ) +
+    scale_fill_manual(
+        breaks = vlnCelltypesAnnot,
+        values = paletteAnnots[vlnCelltypesAnnot],
+        labels = relevantCelltypesLabels[vlnCelltypesAnnot]
+    ) +
+    scale_x_discrete(
+        name = NULL,
+        breaks = vlnCelltypesAnnot,
+        labels = NULL
+    ) +
+    labs(title = feature)
+}
+
+```
+
+```{r wilcox_test_stem_score, eval=T, echo=F}
+
+# Wilcox tests for Stem UCell score
+
+celltypeComparisons <- combn(unique(as.character(SObjSubset@meta.data[[annotCol]])), 2)
+colnames(celltypeComparisons) <- apply(celltypeComparisons, 2, function(x) paste(x, collapse = "_vs_"))
+
+wilcoxStemScore <- list()
+wilcoxStemScoreTable <- data.frame()
+
+for (comparison in colnames(celltypeComparisons)) {
+    groupA <- celltypeComparisons[1, comparison]
+    groupB <- celltypeComparisons[2, comparison]
+
+    valuesA <- SObjSubset@meta.data %>% filter(.data[[annotCol]] == groupA) %>% pull(Stem_UCell)
+    valuesB <- SObjSubset@meta.data %>% filter(.data[[annotCol]] == groupB) %>% pull(Stem_UCell)
+
+    wilcoxStemScore[[comparison]] <- wilcox.test(valuesA, valuesB)
+
+    currWilcoxResults <- data.frame(
+        "comparison" = comparison,
+        "feature" = "Stem_UCell",
+        "U_statistic" = wilcoxStemScore[[comparison]]$statistic,
+        "log2FC" = log(mean(valuesA)/mean(valuesB), base = 2),
+        "p_val" = wilcoxStemScore[[comparison]]$p.value
+    )
+    wilcoxStemScoreTable <- rbind(wilcoxStemScoreTable, currWilcoxResults)
+}
+
+```
+
+# SingleR score heatmaps
+
+## SingleR annotation
+
+```{r score_heatmap_SingleR, eval=T, echo=F, fig.dim=c(15, 10), results = 'asis'}
+
+scoresSingleROrig <- as.data.frame(labelsSingleR$scores)
+rownames(scoresSingleROrig) <- rownames(labelsSingleR)
+
+scoresSingleROrig[["Celltype annotation"]] <- factor(
+    sapply(SObj@meta.data[[annotColSingleR]], function(x) relevantCelltypesSingleRLabels[x]),
+    levels = relevantCelltypesSingleRLabels
+)
+paletteScoreHeatmapSingleR <- paletteAnnotsSingleR
+names(paletteScoreHeatmapSingleR) <- relevantCelltypesSingleRLabels
+
+scoresSingleROrig <- scoresSingleROrig[order(scoresSingleROrig[["Celltype annotation"]]), ]
+
+scoresSingleROrigMat <- t(as.matrix(scoresSingleROrig[, relevantCelltypesSingleROrig]))
+scoresSingleROrigMatNorm <- apply(scoresSingleROrigMat, 2, function(x) (x - min(x))/(max(x) - min(x)))^3
+
+scoreHeatmapSingleRDendro <- pheatmap(
+    scoresSingleROrigMatNorm,
+    color = viridis(100),
+    cluster_rows = TRUE,
+    cluster_cols = FALSE,
+    show_colnames = FALSE,
+    annotation_col = scoresSingleROrig[, "Celltype annotation", drop = FALSE],
+    annotation_colors = list("Celltype annotation" = paletteScoreHeatmapSingleR),
+    annotation_names_col = FALSE,
+    breaks = seq(0, 1, length.out = 101),
+    legend_breaks = c(0, 1),
+    legend_labels = c("Lower", "Higher"),
+    silent = TRUE
+)
+
+scoreHeatmapSingleR <- pheatmap(
+    scoresSingleROrigMatNorm,
+    color = viridis(100),
+    cluster_rows = FALSE,
+    cluster_cols = FALSE,
+    show_colnames = FALSE,
+    annotation_col = scoresSingleROrig[, "Celltype annotation", drop = FALSE],
+    annotation_colors = list("Celltype annotation" = paletteScoreHeatmapSingleR),
+    annotation_names_col = FALSE,
+    breaks = seq(0, 1, length.out = 101),
+    legend_breaks = c(0, 1),
+    legend_labels = c("Lower", "Higher"),
+    silent = TRUE
+)
+
+```
+
+## Monocle-based categorization of Stem and TA subset
+
+```{r score_heatmap_SingleR_annot, eval=T, echo=F, fig.dim=c(15, 10), results='asis'}
+
+scoresSingleRAnnot <- as.data.frame(labelsSingleR$scores)
+rownames(scoresSingleRAnnot) <- rownames(labelsSingleR)
+
+scoresSingleRAnnot[["Celltype annotation"]] <- factor(
+    sapply(SObj@meta.data[[annotCol]], function(x) relevantCelltypesLabels[x]),
+    levels = relevantCelltypesLabels
+)
+paletteScoreHeatmapAnnot <- paletteAnnots
+names(paletteScoreHeatmapAnnot) <- relevantCelltypesLabels
+
+scoresSingleRAnnot <- scoresSingleRAnnot[order(scoresSingleRAnnot[["Celltype annotation"]]), ]
+
+scoresSingleRAnnotMat <- t(as.matrix(scoresSingleRAnnot[, relevantCelltypesSingleROrig]))
+scoresSingleRAnnotMatNorm <- apply(scoresSingleRAnnotMat, 2, function(x) (x - min(x))/(max(x) - min(x)))^3
+
+scoreHeatmatAnnotDendro <- pheatmap(
+    scoresSingleRAnnotMatNorm,
+    color = viridis(100),
+    cluster_rows = TRUE,
+    cluster_cols = FALSE,
+    show_colnames = FALSE,
+    annotation_col = scoresSingleRAnnot[, "Celltype annotation", drop = FALSE],
+    annotation_colors = list("Celltype annotation" = paletteScoreHeatmapAnnot),
+    annotation_names_col = FALSE,
+    breaks = seq(0, 1, length.out = 101),
+    legend_breaks = c(0, 1),
+    legend_labels = c("Lower", "Higher"),
+    silent = TRUE
+)
+
+scoreHeatmapAnnot <- pheatmap(
+    scoresSingleRAnnotMatNorm,
+    color = viridis(100),
+    cluster_rows = FALSE,
+    cluster_cols = FALSE,
+    show_colnames = FALSE,
+    annotation_col = scoresSingleRAnnot[, "Celltype annotation", drop = FALSE],
+    annotation_colors = list("Celltype annotation" = paletteScoreHeatmapAnnot),
+    annotation_names_col = FALSE,
+    breaks = seq(0, 1, length.out = 101),
+    legend_breaks = c(0, 1),
+    legend_labels = c("Lower", "Higher"),
+    silent = TRUE
+)
+
+```
+
+# Marker heatmaps
+
+```{r marker_heatmaps_setup, eval=T, echo=F}
+
+knownMarkers <- list()
+
+knownMarkers[["Stem"]] <- c("Lgr5", "Ascl2", "Slc12a2", "Axin2", "Olfm4", "Gkn3")
+knownMarkers[["Cell_cycle"]] <- c("Mki67", "Cdk4", "Mcm5", "Mcm6", "Pcna")
+knownMarkers[["Enterocyte"]] <- c("Alpi", "Apoa1", "Apoa4", "Fabp1")
+knownMarkers[["Enteroendocrine"]] <- c("Chga", "Chgb", "Tac1", "Tph1", "Neurog3")
+knownMarkers[["Goblet"]] <- c("Muc2", "Clca1", "Tff3", "Agr2") # Replace Clca3 with Clca1, as this appears to be the official name
+knownMarkers[["Paneth"]] <- c("Lyz1", "Defa17", "Defa22", "Defa24", "Ang4")
+knownMarkers[["Tuft"]] <- c("Dclk1", "Trpm5", "Gfi1b", "Il25")
+knownMarkers[["G2M_phase"]] <- str_to_title(tolower(cc.genes.updated.2019$g2m.genes))
+knownMarkers[["S_phase"]] <- str_to_title(tolower(cc.genes.updated.2019$s.genes))
+
+markerGeneCelltypeLabels <- c(
+    "ISC",
+    "Cell cycle",
+    "Enterocyte",
+    "Endocrine",
+    "Goblet",
+    "Paneth",
+    "Tuft",
+    "Cell cycle G2M phase",
+    "Cell cycle S phase"
+)
+names(markerGeneCelltypeLabels) <- names(knownMarkers)
+
+paletteMarkerGeneCelltypes <- c(
+    "ISC" = "#00B6EB",
+    "Cell cycle" = "#595d68",
+    "Enterocyte" = "#C49A00",
+    "Endocrine" = "#F8766D",
+    "Goblet" = "#00C094",
+    "Paneth" = "#FFD92F",
+    "Tuft" = "#FB61D7"
+)
+
+celltypeMarkers <- c()
+markerGeneCelltypes <- c()
+
+for (celltype in names(knownMarkers)[1:7]) {
+    markerGeneCelltypes <- c(
+        markerGeneCelltypes,
+        rep(markerGeneCelltypeLabels[celltype], length(knownMarkers[[celltype]]))
+    )
+    celltypeMarkers <- c(celltypeMarkers, knownMarkers[[celltype]])
+}
+
+celltypeMarkerTable <- data.frame(
+    "marker" = celltypeMarkers,
+    "Celltype markers" = markerGeneCelltypes,
+    row.names = 1,
+    check.names = FALSE
+)
+celltypeMarkerTable[["Celltype markers"]] <- factor(
+    celltypeMarkerTable[["Celltype markers"]], levels = markerGeneCelltypeLabels
+)
+
+scaledDataMarkers <- GetAssayData(SObj, slot = "scale.data")[celltypeMarkers, ]
+
+```
+
+## SingleR annotation
+
+```{r marker_heatmaps_SingleR, eval=T, echo=F, results='asis', fig.dim=c(10, 10)}
+
+paletteMarkerHeatmapSingleR <- paletteAnnotsSingleR
+names(paletteMarkerHeatmapSingleR) <- relevantCelltypesSingleRLabels
+
+annotInfoOrderedSingleR <- data.frame(
+    "cell_id" = rownames(SObj@meta.data),
+    "Celltype annotation" = factor(
+        sapply(SObj@meta.data[[annotColSingleR]], function(x) relevantCelltypesSingleRLabels[x]),
+        levels = relevantCelltypesSingleRLabels
+    ),
+    row.names = "cell_id",
+    check.names = FALSE
+)
+annotInfoOrderedSingleR <- annotInfoOrderedSingleR[
+    order(annotInfoOrderedSingleR[["Celltype annotation"]]), , drop = FALSE
+]
+
+markerHeatmapSingleR <- pheatmap(
+    scaledDataMarkers[, rownames(annotInfoOrderedSingleR)],
+    cluster_rows = FALSE,
+    cluster_cols = FALSE,
+    show_colnames = FALSE,
+    color = colorRampPalette(c("magenta", "black", "yellow"))(100),
+    breaks = seq(-2.5, 2.5, length.out = 101),
+    annotation_col = annotInfoOrderedSingleR,
+    annotation_row = celltypeMarkerTable,
+    annotation_colors = list(
+        "Celltype annotation" = paletteMarkerHeatmapSingleR,
+        "Celltype markers" = paletteMarkerGeneCelltypes
+    ),
+    annotation_names_col = FALSE,
+    annotation_names_row = FALSE,
+    silent = TRUE
+)
+
+```
+
+## Monocle-based categorization of Stem and TA subset
+
+```{r marker_heatmaps_SingleR_annot, eval=T, echo=F, results='asis', fig.dim=c(10, 10)}
+
+paletteMarkerHeatmapAnnot <- paletteAnnots
+names(paletteMarkerHeatmapAnnot) <- relevantCelltypesLabels
+
+annotInfoOrdered <- data.frame(
+    "cell_id" = rownames(SObj@meta.data),
+    "Celltype annotation" = factor(
+        sapply(SObj@meta.data[[annotCol]], function(x) relevantCelltypesLabels[x]),
+        levels = relevantCelltypesLabels
+    ),
+    row.names = "cell_id",
+    check.names = FALSE
+)
+annotInfoOrdered <- annotInfoOrdered[
+    order(annotInfoOrdered[["Celltype annotation"]]), , drop = FALSE
+]
+
+markerHeatmapAnnot <- pheatmap(
+    scaledDataMarkers[, rownames(annotInfoOrdered)],
+    cluster_rows = FALSE,
+    cluster_cols = FALSE,
+    show_colnames = FALSE,
+    color = colorRampPalette(c("magenta", "black", "yellow"))(100),
+    breaks = seq(-2.5, 2.5, length.out = 101),
+    annotation_col = annotInfoOrdered,
+    annotation_row = celltypeMarkerTable,
+    annotation_colors = list(
+        "Celltype annotation" = paletteMarkerHeatmapAnnot,
+        "Celltype markers" = paletteMarkerGeneCelltypes
+    ),
+    annotation_names_col = FALSE,
+    annotation_names_row = FALSE,
+    silent = TRUE
+)
+
+```
+
+```{r save_plots, eval=saveData, echo=F}
+
+plotPath <- proot$find_file(config$outputpath, "fig", "monocle_Stem-TA_ref_regress-cc")
+plotPathUmap <- file.path(plotPath, "umap")
+plotPathUmapSubset <- file.path(plotPath, "umap_subset")
+plotPathTrajectory<- file.path(plotPath, "trajectory")
+plotPathViolin <- file.path(plotPath, "violin")
+plotPathHeatmapsAnnot <- file.path(plotPath, "heatmaps_annot")
+
+### UMAP plots all cells
+
+## Annotation
+
+# UMAP plot SingleR annotation
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_annotation_SingleR.pdf"),
+    plot = umapPlotAnnotSingleR + labs(title = NULL) +
+        theme(
+            text = element_text(size = 20),
+            axis.text = element_text(size = 20),
+            legend.position = "none"
+        ),
+    device = "pdf",
+    dpi = 300,
+    width = 8.5,
+    height = 10
+)
+
+# With legend
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_annotation_SingleR_legend.pdf"),
+    plot = umapPlotAnnotSingleR + labs(title = NULL) +
+        theme(
+            text = element_text(size = 20),
+            axis.text = element_text(size = 20),
+            legend.position = "right"
+        ) + guides(colour = guide_legend(override.aes = list(size = 5))),
+    device = "pdf",
+    dpi = 300,
+    width = 11,
+    height = 10
+)
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_annotation_SingleR_legend.png"),
+    plot = umapPlotAnnotSingleR + labs(title = NULL) +
+        theme(
+            text = element_text(size = 20),
+            axis.text = element_text(size = 20),
+            legend.position = "right"
+        ) + guides(colour = guide_legend(override.aes = list(size = 5))),
+    device = "png",
+    dpi = 300,
+    width = 11,
+    height = 10
+)
+
+# UMAP plot Monocle-based annotation
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_annotation.pdf"),
+    plot = umapPlotAnnot + labs(title = NULL) +
+        theme(
+            text = element_text(size = 20),
+            axis.text = element_text(size = 20),
+            legend.position = "none"
+        ),
+    device = "pdf",
+    dpi = 300,
+    width = 8.5,
+    height = 10
+)
+
+# With legend
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_annotation_legend.pdf"),
+    plot = umapPlotAnnot + labs(title = NULL) +
+        theme(
+            text = element_text(size = 20),
+            axis.text = element_text(size = 20),
+            legend.position = "right"
+        ) + guides(colour = guide_legend(override.aes = list(size = 5))),
+    device = "pdf",
+    dpi = 300,
+    width = 11,
+    height = 10
+)
+
+# UMAP plots Monocle-based annotation, by group
+
+for (group in groups) {
+    currName <- paste0("umap_plot_annotation_cond_", group, ".pdf")
+
+    currPlot <- umapPlotsGroupAnnot[[group]] +
+        labs(title = group) +
+        theme(
+            text = element_text(size = 20),
+            axis.text = element_text(size = 20),
+            legend.position = "none"
+        )
+
+    ggsave(
+        filename = file.path(plotPathUmap, currName),
+        plot = currPlot,
+        device = "pdf",
+        dpi = 300,
+        width = 8.5,
+        height = 10
+    )
+}
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_annotation_cond_comb.pdf"),
+    plot = umapPlotsGroupAnnotComb,
+    dpi = 300,
+    width = 12,
+    height = 15
+)
+
+# UMAP plots Monocle-based annotation, by group, by lib
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_annotation_lib_comb.pdf"),
+    plot = umapPlotsLibAnnotComb,
+    dpi = 300,
+    width = 12,
+    height = 10
+)
+
+## Clustering
+
+# UMAP plot clustering
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_clustering.pdf"),
+    plot = umapPlotClusters + labs(title = NULL) +
+        theme(
+            text = element_text(size = 20),
+            axis.text = element_text(size = 20),
+            legend.position = "none"
+        ),
+    device = "pdf",
+    dpi = 300,
+    width = 8.5,
+    height = 10
+)
+
+# With legend
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_clustering_legend.pdf"),
+    plot = umapPlotClusters + labs(title = NULL) +
+        theme(
+            text = element_text(size = 20),
+            axis.text = element_text(size = 20),
+            legend.position = "right"
+        ) + guides(colour = guide_legend(override.aes = list(size = 5))),
+    device = "pdf",
+    dpi = 300,
+    width = 9.5,
+    height = 10
+)
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_clustering_legend.png"),
+    plot = umapPlotClusters + labs(title = NULL) +
+        theme(
+            text = element_text(size = 20),
+            axis.text = element_text(size = 20),
+            legend.position = "right"
+        ) + guides(colour = guide_legend(override.aes = list(size = 5))),
+    device = "png",
+    dpi = 300,
+    width = 9.5,
+    height = 10
+)
+
+# UMAP plots clustering by group
+
+for (group in groups) {
+    currName <- paste0("umap_plot_clustering_cond_", group, ".pdf")
+
+    currPlot <- umapPlotsGroupCluster[[group]] +
+        labs(title = group) +
+        theme(
+            text = element_text(size = 20),
+            axis.text = element_text(size = 20),
+            legend.position = "none"
+        )
+
+    ggsave(
+        filename = file.path(plotPathUmap, currName),
+        plot = currPlot,
+        device = "pdf",
+        dpi = 300,
+        width = 8.5,
+        height = 10
+    )
+}
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_clustering_cond_comb.pdf"),
+    plot = umapPlotsGroupClusterComb,
+    dpi = 300,
+    width = 11,
+    height = 15
+)
+
+# UMAP plots clustering by lib
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_clustering_lib_comb.pdf"),
+    plot = umapPlotsLibClusterComb,
+    dpi = 300,
+    width = 11,
+    height = 10
+)
+
+## Density
+
+# All cells
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_density.pdf"),
+    plot = umapPlotDensity + labs(title = NULL),
+    device = "pdf",
+    dpi = 300,
+    width = 9.5,
+    height = 10
+)
+
+# By Group
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_density_cond_comb.pdf"),
+    plot = umapPlotsGroupDensityComb,
+    dpi = 300,
+    width = 11,
+    height = 15
+)
+
+## Markers
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_markers.pdf"),
+    plot = umapPlotsMarkersComb,
+    dpi = 300,
+    width = 11,
+    height = 10
+)
+
+## Marker scores
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_markers_scores_stem-cc.pdf"),
+    plot = umapPlotsMarkersScoresCombStemCC + plot_annotation(tag_levels = 'A'),
+    dpi = 300,
+    width = 11,
+    height = 10
+)
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_markers_scores_stem-cc.png"),
+    plot = umapPlotsMarkersScoresCombStemCC + plot_annotation(tag_levels = 'A'),
+    dpi = 300,
+    width = 11,
+    height = 10
+)
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_markers_scores_diff-celltypes.pdf"),
+    plot = umapPlotsMarkersScoresCombDiffCelltypes + plot_annotation(tag_levels = 'A'),
+    dpi = 300,
+    width = 11,
+    height = 10
+)
+
+ggsave(
+    filename = file.path(plotPathUmap, "umap_plot_markers_scores_diff-celltypes.png"),
+    plot = umapPlotsMarkersScoresCombDiffCelltypes + plot_annotation(tag_levels = 'A'),
+    dpi = 300,
+    width = 11,
+    height = 10
+)
+
+### UMAP plots of Stem/TA subset
+
+## Annotation
+
+ggsave(
+    filename = file.path(plotPathUmapSubset, "umap_plot_annotation_subset_comb.pdf"),
+    plot = umapPlotsAnnotSubsetComb,
+    device = "pdf",
+    dpi = 300,
+    width = 10,
+    height = 5
+)
+
+## Density
+
+# All cells subset
+
+ggsave(
+    filename = file.path(plotPathUmapSubset, "umap_plot_density_subset.pdf"),
+    plot = umapPlotDensitySubset + labs(title = NULL),
+    device = "pdf",
+    dpi = 300,
+    width = 7,
+    height = 7
+)
+
+# By Group
+
+ggsave(
+    filename = file.path(plotPathUmapSubset, "umap_plot_density_subset_cond_comb.pdf"),
+    plot = umapPlotsGroupDensitySubsetComb,
+    device = "pdf",
+    dpi = 300,
+    width = 10,
+    height = 15
+)
+
+## Stemness plots
+
+ggsave(
+    filename = file.path(plotPathUmapSubset, "umap_plot_stemness_subset.pdf"),
+    plot = umapPlotsStemSubsetComb,
+    device = "pdf",
+    dpi = 300,
+    width = 10,
+    height = 10
+)
+
+## Overall combined
+
+ggsave(
+    filename = file.path(plotPathUmapSubset, "umap_plot_subset_combined.pdf"),
+    plot = umapPlotsSubsetComb + plot_annotation(tag_levels = 'A'),
+    device = "pdf",
+    dpi = 300,
+    width = 10,
+    height = 12
+)
+
+ggsave(
+    filename = file.path(plotPathUmapSubset, "umap_plot_subset_combined.png"),
+    plot = umapPlotsSubsetComb + plot_annotation(tag_levels = 'A'),
+    device = "png",
+    dpi = 300,
+    width = 10,
+    height = 12
+)
+
+### Trajectory plots
+
+## Individual plots
+
+for (feature in names(trajectoryPlots)) {
+    ggsave(
+        file.path(plotPathTrajectory, paste0("trajectory_plot_", trajectoryPlotNameMapping[feature], ".pdf")),
+        trajectoryPlots[[feature]],
+        width = 8,
+        height = 8
+    )
+}
+
+## Stemness plots combined
+
+ggsave(
+    filename = file.path(plotPathTrajectory, "trajectory_plot_stemness.pdf"),
+    plot = trajectoryPlotsStem,
+    device = "pdf",
+    dpi = 300,
+    width = 10,
+    height = 8
+)
+
+ggsave(
+    filename = file.path(plotPathTrajectory, "trajectory_plot_stemness.png"),
+    plot = trajectoryPlotsStem,
+    device = "png",
+    dpi = 300,
+    width = 10,
+    height = 8
+)
+
+## Overall combined
+
+ggsave(
+    filename = file.path(plotPathTrajectory, "trajectory_plot_combined.pdf"),
+    plot = trajectoryPlotsCombined + plot_annotation(tag_levels = 'A'),
+    device = "pdf",
+    dpi = 300,
+    width = 10,
+    height = 12
+)
+
+ggsave(
+    filename = file.path(plotPathTrajectory, "trajectory_plot_combined.png"),
+    plot = trajectoryPlotsCombined + plot_annotation(tag_levels = 'A'),
+    device = "png",
+    dpi = 300,
+    width = 10,
+    height = 12
+)
+
+## Metabolism/QC metric plots combined
+
+ggsave(
+    filename = file.path(plotPathTrajectory, "trajectory_plot_metab.pdf"),
+    plot = trajectoryPlotsMetab + plot_annotation(tag_levels = 'A'),
+    device = "pdf",
+    dpi = 300,
+    width = 10,
+    height = 8
+)
+
+ggsave(
+    filename = file.path(plotPathTrajectory, "trajectory_plot_metab.png"),
+    plot = trajectoryPlotsMetab + plot_annotation(tag_levels = 'A'),
+    device = "png",
+    dpi = 300,
+    width = 10,
+    height = 8
+)
+
+## Cell cylce plots combined
+
+ggsave(
+    filename = file.path(plotPathTrajectory, "trajectory_plot_cc.pdf"),
+    plot = trajectoryPlotsCellcycle + plot_annotation(tag_levels = 'A'),
+    device = "pdf",
+    dpi = 300,
+    width = 10,
+    height = 8
+)
+
+ggsave(
+    filename = file.path(plotPathTrajectory, "trajectory_plot_cc.png"),
+    plot = trajectoryPlotsCellcycle + plot_annotation(tag_levels = 'A'),
+    device = "png",
+    dpi = 300,
+    width = 10,
+    height = 8
+)
+
+## Cell cylce plots annotation subsets
+
+ggsave(
+    filename = file.path(plotPathTrajectory, "trajectory_plot_cc_annot_subsets.pdf"),
+    plot = trajectoryPlotsCellcycleAnnotSubsets + plot_annotation(tag_levels = 'A'),
+    device = "pdf",
+    dpi = 300,
+    width = 10,
+    height = 8
+)
+
+ggsave(
+    filename = file.path(plotPathTrajectory, "trajectory_plot_cc_annot_subsets.png"),
+    plot = trajectoryPlotsCellcycleAnnotSubsets + plot_annotation(tag_levels = 'A'),
+    device = "png",
+    dpi = 300,
+    width = 10,
+    height = 8
+)
+
+### Violin plots
+
+## SingleR annotation
+
+for (feature in names(vlnPlotsSingleR)) {
+    ggsave(
+        file.path(plotPathViolin, paste0("violin_plot_SingleR_", feature, ".pdf")),
+        vlnPlotsSingleR[[feature]],
+        width = 8,
+        height = 6
+    )
+}
+
+## Monocle-based annotation
+
+for (feature in names(vlnPlotsAnnot)) {
+    ggsave(
+        file.path(plotPathViolin, paste0("violin_plot_annotation_", feature, ".pdf")),
+        vlnPlotsAnnot[[feature]],
+        width = 8,
+        height = 6
+    )
+}
+
+### SingleR score heatmap
+
+## SingleR annotation
+
+pdf(
+    file.path(plotPathHeatmapsAnnot, "score_heatmap_SingleR.pdf"),
+    width = 10,
+    height = 10
+)
+grid.draw(scoreHeatmapSingleR$gtable)
+
+dev.off()
+
+png(
+    file.path(plotPathHeatmapsAnnot, "score_heatmap_SingleR.png"),
+    width = 800,
+    height = 800
+)
+grid.draw(scoreHeatmapSingleR$gtable)
+
+dev.off()
+
+## Monocle-based annotation
+
+pdf(
+    file.path(plotPathHeatmapsAnnot, "score_heatmap_SingleR_annotation.pdf"),
+    width = 10,
+    height = 10
+)
+grid.draw(scoreHeatmapAnnot$gtable)
+
+dev.off()
+
+### Marker expression heatmap
+
+## SingleR annotation
+
+pdf(
+    file.path(plotPathHeatmapsAnnot, "marker_heatmap_SingleR.pdf"),
+    width = 10,
+    height = 10
+)
+grid.draw(markerHeatmapSingleR$gtable)
+
+dev.off()
+
+png(
+    file.path(plotPathHeatmapsAnnot, "marker_heatmap_SingleR.png"),
+    width = 800,
+    height = 800
+)
+grid.draw(markerHeatmapSingleR$gtable)
+
+dev.off()
+
+## Monocle-based annotation
+
+pdf(
+    file.path(plotPathHeatmapsAnnot, "marker_heatmap_annotation.pdf"),
+    width = 10,
+    height = 10
+)
+grid.draw(markerHeatmapAnnot$gtable)
+
+dev.off()
+
+```
+
+```{r save_plot_data, eval=saveData, echo=F}
+
+plotDataPath <- file.path(plotPath, "plot_data")
+
+# UMAP plots
+
+umapPlotData <- as.data.frame(SObj[["umap"]]@cell.embeddings)
+
+all.equal(rownames(umapPlotData), rownames(SObj@meta.data))
+
+umapPlotData[["orig.ident"]] <- SObj@meta.data[["orig.ident"]]
+umapPlotData[["group"]] <- SObj@meta.data[["group"]]
+umapPlotData[[clusterCol]] <- SObj@meta.data[[clusterCol]]
+umapPlotData[["annotation_SingleR"]] <- SObj@meta.data[[annotColSingleR]]
+umapPlotData[["annotation_SingleR_monocle"]] <- SObj@meta.data[[annotCol]]
+umapPlotData[["annotation_SingleR_monocle_subsets"]] <- SObj@meta.data[[annotColSubsets]]
+
+uCellScoreCols <- colnames(SObj@meta.data)[grep("_UCell$", colnames(SObj@meta.data))]
+umapPlotData[, uCellScoreCols] <- SObj@meta.data[, uCellScoreCols]
+
+write.csv(
+    umapPlotData,
+    file = file.path(plotDataPath, "umap_plot_data.csv"),
+    row.names = TRUE,
+    quote = FALSE
+)
+
+# UMAP plots Stem/TA subset
+
+umapPlotDataSubset <- as.data.frame(SObjSubset[["umap"]]@cell.embeddings)
+
+all.equal(rownames(umapPlotDataSubset), rownames(SObjSubset@meta.data))
+
+umapPlotDataSubset[["orig.ident"]] <- SObjSubset@meta.data[["orig.ident"]]
+umapPlotDataSubset[["group"]] <- SObjSubset@meta.data[["group"]]
+umapPlotDataSubset[["annotation_SingleR"]] <- SObjSubset@meta.data[[annotColSingleR]]
+umapPlotDataSubset[["annotation_SingleR_monocle"]] <- SObjSubset@meta.data[[annotCol]]
+
+uCellScoreCols <- colnames(SObjSubset@meta.data)[grep("_UCell$", colnames(SObjSubset@meta.data))]
+umapPlotDataSubset[, uCellScoreCols] <- SObjSubset@meta.data[, uCellScoreCols]
+
+umapPlotDataSubset[["Pseudotime"]] <- SObjSubset@meta.data[["Pseudotime"]]
+umapPlotDataSubset[["Lgr5"]] <- umapPlotsStemSubset[["Lgr5"]]$data[["Lgr5"]]
+umapPlotDataSubset[["Olfm4"]] <- umapPlotsStemSubset[["Olfm4"]]$data[["Olfm4"]]
+
+write.csv(
+    umapPlotDataSubset,
+    file = file.path(plotDataPath, "umap_plot_data_subset.csv"),
+    row.names = TRUE,
+    quote = FALSE
+)
+
+# Trajectory plots
+
+trajectoryPlotData <- as.data.frame(t(monoObj@reducedDimS))
+colnames(trajectoryPlotData) <- c("Component_1", "Component_2")
+
+trajectoryPlotData[["orig.ident"]] <- pData(monoObj)[["orig.ident"]]
+trajectoryPlotData[["group"]] <- pData(monoObj)[["group"]]
+trajectoryPlotData[["Pseudotime"]] <- pData(monoObj)[["Pseudotime"]]
+trajectoryPlotData[["State"]] <- pData(monoObj)[["State"]]
+trajectoryPlotData[["annotation_SingleR"]] <- pData(monoObj)[[annotColSingleR]]
+trajectoryPlotData[["annotation_SingleR_monocle"]] <- pData(monoObj)[[annotCol]]
+trajectoryPlotData[["annotation_SingleR_monocle_subsets"]] <- pData(monoObj)[[annotColSubsets]]
+
+trajectoryPlotData[["Lgr5"]] <- pData(monoObj)[["Lgr5"]]
+trajectoryPlotData[["Olfm4"]] <- pData(monoObj)[["Olfm4"]]
+uCellScoreCols <- colnames(pData(monoObj))[grep("_UCell$", colnames(pData(monoObj)))]
+trajectoryPlotData[, uCellScoreCols] <- pData(monoObj)[, uCellScoreCols]
+
+write.csv(
+    trajectoryPlotData,
+    file = file.path(plotDataPath, "trajectory_plot_data.csv"),
+    row.names = TRUE,
+    quote = FALSE
+)
+
+# Violin plots
+
+violinPlotData <- as.data.frame(t(normCounts[c("Lgr5", "Olfm4"), ]))
+
+all.equal(rownames(violinPlotData), rownames(SObj@meta.data))
+
+violinPlotData[["Stem_UCell"]] <- SObj@meta.data[["Stem_UCell"]]
+
+violinPlotData[["annotation_SingleR"]] <- SObj@meta.data[[annotColSingleR]]
+violinPlotData[["annotation_SingleR_monocle"]] <- SObj@meta.data[[annotCol]]
+
+write.csv(
+    violinPlotData,
+    file = file.path(plotDataPath, "violin_plot_data.csv"),
+    row.names = TRUE,
+    quote = FALSE
+)
+
+# SingleR score heatmaps
+
+scoreHeatmapData <- as.data.frame(t(scoresSingleROrigMatNorm))[rownames(SObj@meta.data), ]
+
+all.equal(rownames(scoreHeatmapData), rownames(SObj@meta.data))
+
+scoreHeatmapData[["annotation_SingleR"]] <- SObj@meta.data[[annotColSingleR]]
+scoreHeatmapData[["annotation_SingleR_monocle"]] <- SObj@meta.data[[annotCol]]
+
+write.csv(
+    scoreHeatmapData,
+    file = file.path(plotDataPath, "SingleR_score_heatmap_data.csv"),
+    row.names = TRUE,
+    quote = FALSE
+)
+
+# Marker heatmap data
+
+markerHeatmapData <- as.data.frame(t(scaledDataMarkers))
+
+all.equal(rownames(markerHeatmapData), rownames(SObj@meta.data))
+
+markerHeatmapData[["annotation_SingleR"]] <- SObj@meta.data[[annotColSingleR]]
+markerHeatmapData[["annotation_SingleR_monocle"]] <- SObj@meta.data[[annotCol]]
+
+write.csv(
+    markerHeatmapData,
+    file = file.path(plotDataPath, "marker_heatmap_data.csv"),
+    row.names = TRUE,
+    quote = FALSE
+)
+
+# Marker gene data
+
+markerGeneInfo <- celltypeMarkerTable %>% tibble::rownames_to_column("marker_gene")
+colnames(markerGeneInfo)[2] <- "celltype"
+
+write.csv(
+    markerGeneInfo,
+    file = file.path(plotDataPath, "marker_gene_info.csv"),
+    row.names = FALSE,
+    quote = FALSE
+)
+
+```
+
+# SessionInfo
+
+```{r sessionInfo}
+
+sessionInfo()
+
+```
+

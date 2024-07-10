@@ -1,0 +1,20 @@
+Seurat_rawobj:
+  A2-library-2: experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/data/SeuratObj_raw_A2-library-2_2023-03-24.rds
+  A3-library-2: experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/data/SeuratObj_raw_A3-library-2_2023-03-24.rds
+  A5-library-2: experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/data/SeuratObj_raw_A5-library-2_2023-03-24.rds
+Seurat_rawall: experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/data/SeuratObj_raw_merged_2023-03-24.rds
+config: experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/config.yaml
+outpaths:
+  fig: fig
+  table: table
+  data: data
+  report: report
+filters:
+  nCount_RNA: ~
+  nFeature_RNA: ~
+  percent.mt: ~
+scParam:
+  PCdims: ~
+  jack: no
+  VarFeat: 3000
+  integration: ~

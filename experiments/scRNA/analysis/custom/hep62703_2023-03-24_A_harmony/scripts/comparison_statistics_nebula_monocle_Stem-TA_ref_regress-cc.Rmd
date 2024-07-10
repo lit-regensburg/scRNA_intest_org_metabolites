@@ -1,0 +1,193 @@
+---
+title: "Comparison statistics for NEBULA differential expression results"
+author: "Paul Heinrich"
+output: 
+    html_document:
+        toc: true
+---
+
+```{r setup1, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Notes
+
+```{r setup2,echo=FALSE, warning=FALSE}
+#rbioc_3-14
+library(rprojroot)
+library(yaml)
+library(knitr)
+
+saveData <- TRUE
+
+root_criterion <- ".projroot"
+proot <- rprojroot::has_file(root_criterion)
+
+source(proot$find_file("experiments/scRNA/analysis/custom/functions/custom_functions.R"))
+
+params <- list()
+params$config <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/config.yaml")
+params$analparams <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/analparams_preprocessing_filters_2023-03-24.yaml")
+params$date <- Sys.Date()
+
+config <- yaml.load_file(proot$find_file(params$config))
+today <- params$date
+
+print(today)
+
+config <- yaml.load_file(proot$find_file(params$config))
+analparams <- yaml.load_file(proot$find_file(params$analparams))
+
+# libraries
+libload <- c(
+    "Seurat","ggplot2", "harmony", "Nebulosa", "future",
+    "WriteXLS", "knitr", "stringr", "dplyr", "foreach", "doParallel"
+)
+
+for(i in libload) {
+    library(i, character.only = T)
+}
+
+plan("multicore", workers = 6)
+plan()
+
+# Parallelization with doParallel
+
+registerDoParallel(7)
+
+set.seed(7)
+
+```
+
+```{r loaddata,eval=T,echo=F}
+
+nebulaFit <- readRDS(proot$find_file(config$outputpath, "data", "diff_expr_nebula_cond_cpc-0.005_monocle_Stem-TA_ref_regress-cc_2024-03-21.rds"))
+
+```
+
+# Compute statistics for comparisons
+
+```{r , eval=T, echo=F}
+
+celltypes <- names(nebulaFit)
+comparisons <- list(
+    "WT_DAT_vs_WT_Ctrl" = c("logFC_treat_WT_DAT"),
+    "WT_ICA_vs_WT_Ctrl" = c("logFC_treat_WT_ICA"),
+    "WT_DAT_vs_WT_ICA" = c("logFC_treat_WT_DAT", "logFC_treat_WT_ICA"),
+    "GT_DAT_vs_GT_Ctrl" = c("logFC_treat_GT_DAT", "logFC_treat_GT_Ctrl"),
+    "GT_ICA_vs_GT_Ctrl" = c("logFC_treat_GT_ICA", "logFC_treat_GT_Ctrl"),
+    "GT_DAT_vs_GT_ICA" = c("logFC_treat_GT_DAT", "logFC_treat_GT_ICA"),
+    "GT_Ctrl_vs_WT_Ctrl" = c("logFC_treat_GT_Ctrl"),
+    "GT_DAT_vs_WT_DAT" = c("logFC_treat_GT_DAT", "logFC_treat_WT_DAT"),
+    "GT_ICA_vs_WT_ICA" = c("logFC_treat_GT_ICA", "logFC_treat_WT_ICA"),
+    "L3_vs_L2" = c("logFC_lib_L3"),
+    "L5_vs_L2" = c("logFC_lib_L5"),
+    "L5_vs_L3" = c("logFC_lib_L5", "logFC_lib_L3"),
+    "nFeature_RNA" = c("logFC_nFeature_RNA")
+)
+
+contrasts <- list()
+
+coefIdx <- grep("logFC", colnames(nebulaFit[[1]]$summary))
+coefNames <- colnames(nebulaFit[[1]]$summary)[coefIdx]
+contrastZeros <- rep(0, length = length(coefNames))
+names(contrastZeros) <- coefNames
+
+for (comparison in names(comparisons)) {
+    currContrast <- contrastZeros
+    currContrast[comparisons[[comparison]][1]] <- 1
+
+    if (length(comparisons[[comparison]]) > 1) {
+        currContrast[comparisons[[comparison]][2]] <- -1
+    }
+
+    contrasts[[comparison]] <- currContrast
+}
+
+comparisonStats <- foreach(celltype = celltypes) %dopar% {
+    genes <- nebulaFit[[celltype]]$summary$gene
+    statTable <- data.frame("gene" = genes)
+
+    comparisonNo <- 1
+
+    for (comparison in names(comparisons)) {
+        print(Sys.time())
+        print(paste0("Celltype ", celltype, ", comparison: ", comparison))
+        print(paste0("Celltype ", celltype, ", comparison ", comparisonNo, " out of ", length(comparisons)))
+        currStats <- rep(NA, length = length(genes))
+        currLogFC <- rep(NA, length = length(genes))
+        geneIdx <- 1
+
+        for (gene in statTable$gene) {
+            covMat <- matrix(NA, length(contrastZeros), length(contrastZeros))
+            rownames(covMat) <- names(contrastZeros)
+            colnames(covMat) <- names(contrastZeros)
+
+            covMat[lower.tri(covMat, diag=T)] <- as.numeric(nebulaFit[[celltype]]$covariance[geneIdx, ])
+            covMat[upper.tri(covMat)] <- t(covMat)[upper.tri(covMat)]
+            
+            currContrast <- contrasts[[comparison]]
+
+            coefDiff <- sum(
+                currContrast*nebulaFit[[celltype]]$summary[geneIdx, names(currContrast)]
+            )
+            currLogFC[geneIdx] <- coefDiff
+
+            pVal <- as.vector(
+                pchisq(coefDiff^2/(t(currContrast)%*%covMat%*%currContrast), 1, lower.tail = FALSE)
+            )
+            currStats[geneIdx] <- pVal
+
+            geneIdx <- geneIdx + 1
+        }
+
+        statTable[[paste0("logFC_", comparison)]] <- currLogFC
+        statTable[[paste0("p_", comparison)]] <- currStats
+
+        comparisonNo <- comparisonNo + 1
+    }
+
+    statTable
+}
+names(comparisonStats) <- celltypes
+
+# Sanity check, compare p values obtained via contrasts with p values directly from model
+
+for (celltype in celltypes) {
+    print(paste0("Celltype ", celltype))
+    print("p_WT_DAT_vs_WT_Ctrl")
+    print(sum(
+        nebulaFit[[celltype]]$summary[, "p_treat_WT_DAT"] -
+        comparisonStats[[celltype]][, "p_WT_DAT_vs_WT_Ctrl"]
+    ))
+    print("p_WT_ICA_vs_WT_Ctrl")
+    print(sum(
+        nebulaFit[[celltype]]$summary[, "p_treat_WT_ICA"] -
+        comparisonStats[[celltype]][, "p_WT_ICA_vs_WT_Ctrl"]
+    ))
+}
+
+head(nebulaFit$Enterocyte$summary[, grep("^p_", colnames(nebulaFit$Enterocyte$summary))])
+head(comparisonStats$Enterocyte[, grep("^p_", colnames(comparisonStats$Enterocyte))])
+head(nebulaFit$Enterocyte$summary[, grep("^logFC_", colnames(nebulaFit$Enterocyte$summary))])
+head(comparisonStats$Enterocyte[, grep("^logFC_", colnames(comparisonStats$Enterocyte))])
+
+```
+
+```{r save_data, echo=FALSE, warning=FALSE, eval=saveData}
+
+saveRDS(
+    comparisonStats,
+    proot$find_file(config$outputpath, "data", paste0("stats_nebula_cond_cpc-0.005_monocle_Stem-TA_ref_regress-cc_", today, ".rds"))
+)
+
+```
+
+# SessionInfo
+
+```{r sessionInfo}
+
+sessionInfo()
+
+```
+

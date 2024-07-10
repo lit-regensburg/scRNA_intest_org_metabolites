@@ -1,0 +1,271 @@
+---
+title: "Preprocessing"
+author: "Inma Hernandez & Nicholas Strieder"
+output: html_document
+---
+
+```{r setup1, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loading and demutlipexing the data 
+
+```{r setup2,echo=FALSE, warning=FALSE}
+#rbioc_3-14
+library(rprojroot)
+library(yaml)
+
+root_criterion <- ".projroot"
+proot <- rprojroot::has_file(root_criterion)
+
+params <- list()
+params$config <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/config.yaml")
+params$analparams <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/analparams.yaml")
+params$date <- Sys.Date()
+
+config <- yaml.load_file(proot$find_file(params$config))
+today <- params$date
+
+# libraries
+libload<-c("Seurat","scales","tidyverse","ggplot2","dplyr","future")
+
+for(i in libload){
+             library(i,character.only = T)}
+
+# parallelization in Seurat with future
+# see https://satijalab.org/seurat/articles/future_vignette.html
+plan("multiprocess", workers = 6)
+#plan()
+
+# bibliography
+
+try(
+    knitr::write_bib(
+        c(.packages()),
+        proot$find_file(config$outputpath, "references/R.bib")
+    )
+)
+
+```
+
+## Introduction
+
+HTO are cross-linked with antibodies that bind to ubiquitous cell surface proteins. We then multiplexed all batches and processed them into the same 10X Chromium Chip Channel ([GEM well](https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/glossary)), hence sequencing together HTO and single-cell gene expression reads (cDNA). Finally, we can detect inter-batch doublets as those cell barcodes that have high counts of two or more HTO.
+
+The objective of this notebook is to demultiplex the barcodes (cells) back to its original batch to discard doublets and negative cells.
+
+```{r functions, eval=T,echo=F,message=F,warning=F}
+## functions:
+
+loadndemux<-function(datdir){
+    # hashtags: anti human:A0251-A0260,A0262-A0265,A0276,B0251-B0260,C0251-C0260,C0262-C265
+    #           anti mouse:A0301-A0315,B0301-B310,C0301-C0310
+
+    hashtags <- c(paste("A0",c(251:260,262:265,276,301:315),sep=""),
+                  paste("B0",c(251:260,301:310),sep=""),
+                  paste("C0",c(251:260,262:265,301:310),sep=""))
+    # LoadData
+    # if named vector is supplied, the cellids are prefixed with the ID
+    if(length(names(datdir))==0){stop("No named vector supplied")}
+    matrices <- Read10X(data.dir = datdir)
+    # Demux
+    #To demultiplex, we will follow the ["Demultiplexing with hashtag oligos (HTOs)" pipeline from 
+    #Seurat](https://satijalab.org/seurat/v3.0/hashing_vignette.html):
+
+    SObj<-CreateSeuratObject(counts = matrices$`Gene Expression`)#,min.cells=3,min.features=200)
+    # Add HTO as an independent assay
+    feattab<-read_tsv(file.path(datdir,"features.tsv.gz"),col_names=F)
+    colnames(feattab)<-c("ID","name","type")
+    feattab <- feattab %>% filter(grepl("Antibody Capture",type))
+    hashtab <- feattab %>% filter(ID %in% hashtags)
+    feattabf <- feattab %>% filter(!ID %in% hashtags)
+    
+    if(length(hashtab[,1])){
+    SObj[["HTO"]] <- CreateAssayObject(counts = matrices$`Antibody Capture`[hashtab$name,])
+    SObj  <- NormalizeData(SObj, assay = "HTO", normalization.method = "CLR")
+    # Demultiplex
+    SObj <- HTODemux(SObj, assay = "HTO", positive.quantile = 0.99)
+    }
+    if(nrow(feattabf)){
+    # Add ADT as an independent assay
+    SObj[["ADT"]] <- CreateAssayObject(counts = matrices$`Antibody Capture`[feattabf$name,])
+    SObj <- NormalizeData(SObj, assay = "ADT", normalization.method = "CLR",margin=2)
+    }
+    return(SObj)
+}
+
+
+loadd<-function(datdir){
+    # LoadData
+    # if named vector is supplied, the cellids are prefixed with the ID
+    if(length(names(datdir))==0){stop("No named vector supplied")}
+    matrices <- Read10X(data.dir = datdir)
+    # Demux
+    #To demultiplex, we will follow the ["Demultiplexing with hashtag oligos (HTOs)" pipeline from 
+    #Seurat](https://satijalab.org/seurat/v3.0/hashing_vignette.html):
+
+    SObj<-CreateSeuratObject(counts = matrices,min.cells=3,min.features=200)
+    return(SObj)
+}
+
+
+ridgeplot<-function(SObju){
+    
+print(table(SObju$HTO_classification.global))
+print(table(SObju$HTO_classification))
+Idents(SObju) <- "HTO_maxID"
+pd<-RidgePlot(
+            object = SObju, 
+              assay = "HTO", 
+              features = rownames(SObju[["HTO"]]), 
+                ncol = 3
+              )
+print(pd)
+}
+
+
+tSNEfun<-function(SObj){
+    SObj_subset <- subset(
+                       SObj,
+                         subset = HTO_classification.global == "Negative",
+                         invert = TRUE
+                         )
+    DefaultAssay(SObj_subset) <- "HTO"
+    SObj_subset <- SObj_subset %>%
+      ScaleData(features = rownames(SObj_subset), verbose = TRUE) %>%
+        RunPCA(features = rownames(SObj_subset[["HTO"]]), approx = FALSE) %>%
+          RunTSNE(dims = 1:2, perplexity = 100,check_duplicates = FALSE)
+     pd <- DimPlot(SObj_subset, group.by = "HTO_classification.global")
+     print(pd)
+}
+```
+
+```{r analparamssetup,eval=T,echo=F,message=F,warning=F}
+analparams<-yaml.load_file(proot$find_file(params$analparams))
+```
+
+```{r loaddata,eval=T,echo=F,message=F,warning=F}
+
+# Samples from inputdir
+
+samples<-list.dirs(proot$find_file(config$inputpath),full.names=F,recursive=F)
+sampnames<-sub("_run_[0-9]*","",sub("p[0-9A-z]{3}_","",samples))
+if(any(grepl("_sc[A-z]{3,4}_",samples))){
+   sampnames<-sub("sc[RTC][NCS][ARP].{0,1}_","",sampnames)
+}
+sampnames<-gsub("_","-",sampnames)
+names(samples)<-sampnames
+
+
+# cellranger outputpath
+path_to_data <- sapply(samples, 
+                         function(x) proot$find_file(config$inputpath,
+                                    x,"outs","filtered_feature_bc_matrix"))
+
+# load data into seurat, used named vector to have samples with names
+SObjl<-list()
+if(config$cellhash){
+    # cellhasing used
+   for ( samp in names(path_to_data)){
+        SObjl[[samp]]<-loadndemux(path_to_data[samp])
+   }        
+
+}else{
+    # no cellhasing
+   for (samp in names(path_to_data)){
+       SObjl[[samp]]<-loadd(path_to_data[samp])
+   }
+}
+
+
+# save data as rds
+
+Seurat_rawobj<-list()
+for(samp in names(SObjl)){
+    outname <- file.path(config$outputpath,"data",
+                         paste("SeuratObj_raw_",samp,"_",today,".rds",sep=""))
+    datapath=file.path(config$outputpath,"data")
+    if(!dir.exists(proot$find_file(datapath))){
+        dir.create(proot$find_file(datapath))
+       print("created data path")
+    }
+    saveRDS(SObjl[[samp]],file = proot$find_file(outname))
+    Seurat_rawobj[[samp]]<-outname
+}
+
+
+analparams$Seurat_rawobj <- Seurat_rawobj
+
+# join data as rds
+   SObjf<-merge(x=SObjl[[1]],y=SObjl[2:length(SObjl)])
+   outname <- file.path(config$outputpath,"data",
+                         paste("SeuratObj_raw_merged_",today,".rds",sep=""))
+   saveRDS(SObjf,file = proot$find_file(outname))
+   analparams$Seurat_rawall <- outname
+
+
+
+
+```
+
+```{r analparams,eval=T,echo=F}
+
+analparams$config <- params$config
+write_yaml(
+    analparams,
+    file=proot$find_file(
+        dirname(params$analparams),
+        paste("analparams_preprocessing_", today, ".yaml",sep="")
+    )
+)
+
+```
+
+# Visualization
+
+We can visualize the results as ridge plots and heatmaps
+  
+## Ridge plots
+    
+```{r ridgeplot,fig.height=10, fig.width=14,echo=FALSE,message=F,warning=F}
+if(config$cellhash){
+    for(samp in names(SObjl)){
+        print(paste("Ridge plot for sample: ",samp,sep=""))
+        ridgeplot(SObjl[[samp]])
+    }
+}
+```
+
+## Heatmaps
+
+In this heatmap, each column represents a 10X barcode, and each row the expression of a batch-specific HTO. We can visualize singlets, doublets and negative cells (ie not labelled by any HTO). We strive for a similar number of cells across batches, as this increases our ability to identify doublets.
+
+```{r Heatmap,eval=T,echo=FALSE,message=F,warning=F}
+if(config$cellhash){
+    for(samp in names(SObjl)){
+        print(paste("Heatmap for sample: ",samp,sep=""))
+        pd<-HTOHeatmap(SObjl[[samp]], assay = "HTO", ncells = 5000)
+        print(pd)
+    }
+}
+
+```
+
+## tSNE
+
+We can visualize the tSNE embedding of cells in HTO space. A clear separation of clusters would indicate a good labeling:
+
+```{r tSNE,eval=T,echo=FALSE,message=F,warning=F}
+if(config$cellhash){
+    for(samp in names(SObjl)){
+        print(paste("tSNE for sample: ",samp,sep=""))
+        tSNEfun(SObjl[[samp]])
+    }
+}
+```
+
+## SessionInfo()
+
+```{r sessionInfo,echo=T}
+sessionInfo()
+```

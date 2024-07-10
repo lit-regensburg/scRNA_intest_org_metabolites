@@ -1,0 +1,199 @@
+---
+title: "Module and UCell scores of known marker genes"
+author: "Paul Heinrich"
+output: 
+    html_document:
+        toc: true
+---
+
+```{r setup1, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Notes
+
+This script is run with **rbioc_3-15** (R 4.2.0) to be able to use the _UCell_ package.
+
+Known markers derived from "A single-cell survey of the small intestinal epithelium"
+(Haber et al., 2017, Nature), Extended Data Figure 1.
+
+```{r setup2,echo=FALSE, warning=FALSE}
+#rbioc_3-14
+library(rprojroot)
+library(yaml)
+library(knitr)
+
+saveData <- TRUE
+
+root_criterion <- ".projroot"
+proot <- rprojroot::has_file(root_criterion)
+
+source(proot$find_file("experiments/scRNA/analysis/custom/functions/custom_functions.R"))
+
+params <- list()
+params$config <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/config.yaml")
+params$analparams <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/analparams_preprocessing_filters_2023-03-24.yaml")
+params$date <- Sys.Date()
+
+config <- yaml.load_file(proot$find_file(params$config))
+today <- params$date
+
+print(today)
+
+config <- yaml.load_file(proot$find_file(params$config))
+analparams <- yaml.load_file(proot$find_file(params$analparams))
+
+# libraries
+libload <- c(
+    "Seurat","ggplot2", "harmony", "Nebulosa", "future",
+    "WriteXLS", "knitr", "stringr", "dplyr", "UCell"
+)
+
+for(i in libload) {
+    library(i, character.only = T)
+}
+
+plan("multicore", workers = 6)
+plan()
+
+set.seed(7)
+
+```
+
+```{r loaddata,eval=T,echo=F}
+
+SObj <- readRDS(proot$find_file(analparams$Seurat_clustered))
+
+```
+
+```{r prepare_data,eval=T,echo=F}
+
+knownMarkers <- list()
+
+knownMarkers[["Stem"]] <- c("Lgr5", "Ascl2", "Slc12a2", "Axin2", "Olfm4", "Gkn3")
+knownMarkers[["Cell_cycle"]] <- c("Mki67", "Cdk4", "Mcm5", "Mcm6", "Pcna")
+knownMarkers[["Enterocyte"]] <- c("Alpi", "Apoa1", "Apoa4", "Fabp1")
+knownMarkers[["Enteroendocrine"]] <- c("Chga", "Chgb", "Tac1", "Tph1", "Neurog3")
+knownMarkers[["Goblet"]] <- c("Muc2", "Clca1", "Tff3", "Agr2") # Replace Clca3 with Clca1, as this appears to be the official name
+knownMarkers[["Paneth"]] <- c("Lyz1", "Defa17", "Defa22", "Defa24", "Ang4")
+knownMarkers[["Tuft"]] <- c("Dclk1", "Trpm5", "Gfi1b", "Il25")
+knownMarkers[["G2M_phase"]] <- str_to_title(tolower(cc.genes.updated.2019$g2m.genes))
+knownMarkers[["S_phase"]] <- str_to_title(tolower(cc.genes.updated.2019$s.genes))
+
+knownMarkersInGenes <- list()
+
+for (celltype in names(knownMarkers)) {
+    knownMarkersInGenes[[celltype]] <- unname(unlist(sapply(
+        knownMarkers[[celltype]], function(x) rownames(SObj)[grep(paste0("^", x, "$"), rownames(SObj))]
+    )))
+}
+
+all.equal(knownMarkers, knownMarkersInGenes)
+
+# Create marker table
+
+markerGroups <- c()
+markerGenes <- c()
+
+for (group in names(knownMarkers)) {
+    markerGenes <- c(markerGenes, knownMarkers[[group]])
+    markerGroups <- c(markerGroups, rep(group, length(knownMarkers[[group]])))
+}
+
+markerTable <- data.frame(
+    group = markerGroups,
+    feature = markerGenes
+)
+
+```
+
+# Module score plots of known markers
+
+```{r compute_module_score, eval=T, echo=F}
+
+for (celltype in names(knownMarkersInGenes)) {
+    SObj[[paste0("MS_", celltype)]] <- AddModuleScore(
+        SObj,
+        features = knownMarkersInGenes[[celltype]],
+        name = celltype,
+        search = TRUE
+    )[[paste0(celltype, "1")]]
+}
+
+```
+
+```{r plot_module_score, eval=T, echo=F, results='asis', fig.dim=c(10, 10)}
+
+cat("### Clusters")
+cat("\n\n")
+print(DimPlot(SObj))
+cat("\n\n")
+
+for (celltype in names(knownMarkersInGenes)) {
+    cat(paste0("### Celltype: ", celltype))
+    cat("\n\n")
+    cat(paste0("Markers: ", paste(knownMarkers[[celltype]], collapse = ", ")))
+    cat("\n\n")
+    cat(paste0("Markers found: ", paste(knownMarkersInGenes[[celltype]], collapse = ", ")))
+    cat("\n\n")
+    print(FeaturePlot(SObj, features = paste0("MS_", celltype)))
+    cat("\n\n")
+}
+
+```
+
+# UCell score plots of known markers
+
+```{r compute_ucell_score, eval=T, echo=F}
+
+SObj <- AddModuleScore_UCell(
+    SObj,
+    features = knownMarkersInGenes,
+    slot = "data",
+    maxRank = 3000
+)
+
+```
+
+```{r plot_ucell_score, eval=T, echo=F, results='asis', fig.dim=c(10, 10)}
+
+cat("### Clusters")
+cat("\n\n")
+print(DimPlot(SObj))
+cat("\n\n")
+
+for (celltype in names(knownMarkersInGenes)) {
+    cat(paste0("### Celltype: ", celltype))
+    cat("\n\n")
+    cat(paste0("Markers: ", paste(knownMarkers[[celltype]], collapse = ", ")))
+    cat("\n\n")
+    cat(paste0("Markers found: ", paste(knownMarkersInGenes[[celltype]], collapse = ", ")))
+    cat("\n\n")
+    print(FeaturePlot(SObj, features = paste0(celltype, "_UCell")))
+    cat("\n\n")
+}
+
+```
+
+```{r save_data, eval=saveData, echo=F}
+
+analparams$last_modified_time <- as.character(Sys.time())
+analparams$last_modified_entry <- "Seurat_clustered"
+
+saveRDS(SObj, file = proot$find_file(analparams[["Seurat_clustered"]]))
+
+write_yaml(
+    analparams,
+    file=proot$find_file(params$analparams)
+)
+
+```
+
+# SessionInfo
+
+```{r sessionInfo}
+
+sessionInfo()
+
+```
+

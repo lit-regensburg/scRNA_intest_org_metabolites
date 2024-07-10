@@ -1,0 +1,300 @@
+---
+title: "Differential abundance between celltypes"
+subtitle: "Analysis with glm.nb from MASS package"
+author: "Paul Heinrich"
+output: 
+    html_document:
+        toc: true
+---
+
+```{r setup1, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.dim = c(10, 10))
+```
+
+# Notes
+
+Differential celltype abundance testing using glm.nb from the MASS package to perform negative binomial
+regression on celltype counts. Normalization by total cell counts.
+
+Reference single cell dataset from "A single-cell survey of the small intestinal epithelium"
+(Haber et al., 2017, Nature), available at NCBI GEO (https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE92332).
+
+```{r setup2,echo=FALSE, warning=FALSE, message=FALSE}
+#rbioc_3-14
+library(rprojroot)
+library(yaml)
+library(knitr)
+
+saveData <- TRUE
+
+root_criterion <- ".projroot"
+proot <- rprojroot::has_file(root_criterion)
+
+source(proot$find_file("experiments/scRNA/analysis/custom/functions/custom_functions.R"))
+
+params <- list()
+params$config <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/config.yaml")
+params$analparams <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/analparams_preprocessing_filters_2023-03-24.yaml")
+params$date <- Sys.Date()
+
+config <- yaml.load_file(proot$find_file(params$config))
+analparams <- yaml.load_file(proot$find_file(params$analparams))
+today <- params$date
+
+print(today)
+
+# libraries
+
+libload <- c(
+    "Seurat", "ggplot2", "harmony", "Nebulosa", "future",
+    "WriteXLS", "knitr", "stringr", "dplyr", "tidyr", "MASS"
+)
+
+for(i in libload) {
+    library(i, character.only = T)
+}
+
+# Parallelization with future
+
+plan("multicore", workers = 6)
+plan()
+
+set.seed(7)
+```
+
+```{r loaddata,eval=T,echo=F}
+
+cellData <- read.csv(
+    proot$find_file(config$outputpath, "data", "celltype_counts_monocle_Stem-TA_ref_regress-cc_2024-03-21.csv")
+)
+
+```
+
+```{r prepare_data, eval=T, echo=F}
+
+celltypes <- colnames(cellData)[3:ncol(cellData)]
+relevantCelltypes <- c(
+    "Stem",
+    "Stem.TA", 
+    "TA", 
+    "Enterocyte.Progenitor",
+    "Enterocyte",
+    "Endocrine",
+    "Goblet.Paneth"
+)
+
+libraryMapping <- c("L2", "L3", "L5")
+names(libraryMapping) <- c("A2-library-2", "A3-library-2", "A5-library-2")
+
+cellData[["lib"]] <- sapply(cellData[["orig.ident"]], function(x) libraryMapping[x])
+cellData[["cond"]] <- str_replace(cellData[["group"]], "-", "_")
+
+cellData[["sample"]] <- paste0(cellData[["cond"]], "_", cellData[["lib"]])
+
+countsAll <- t(cellData[, celltypes])
+colnames(countsAll) <- cellData[["sample"]]
+counts <- countsAll[relevantCelltypes, ]
+
+metacols <- c("cond", "lib")
+
+for (col in metacols) {
+    cellData[[col]] <- factor(cellData[[col]], levels = unique(cellData[[col]]))
+}
+
+coldata <- cellData[, metacols]
+rownames(coldata) <- cellData$sample
+
+```
+
+```{r model_fit, eval=T, echo=F, warning = FALSE}
+
+# Suppress warnings in output as they are only iteration limit warnings
+# These occur if the distribution is not overdispersed (theta goes towards infinity),
+# which is not a problem
+
+totalCounts <- apply(countsAll, 2, sum)
+logTotalCounts <- log(totalCounts + 1)
+
+fittedModels <- list()
+
+for (celltype in relevantCelltypes) {
+    currData <- coldata
+    currData[["log_total_counts"]] <- logTotalCounts
+    currData[["y"]] <- counts[celltype, ]
+
+    # Alternation limit is reached for Enterocyte celltype with default maxit of 25,
+    # thus increase maxit
+
+    if (celltype == "Enterocyte") {
+        glmControl <- glm.control(maxit = 200)
+    } else {
+        glmControl <- glm.control()
+    }
+
+    fittedModels[[celltype]] <- glm.nb(
+        formula = y ~ cond + lib + offset(log_total_counts),
+        data = currData,
+        link = log,
+        control = glmControl,
+        x = TRUE
+    )
+}
+
+```
+
+# Differential abundance testing results
+
+```{r construct_contrasts, eval=T, echo=F}
+
+comparisons <- list(
+    c("WT_DAT", "WT_Ctrl"),
+    c("WT_ICA", "WT_Ctrl"),
+    c("WT_DAT", "WT_ICA"),
+    c("GT_DAT", "GT_Ctrl"),
+    c("GT_ICA", "GT_Ctrl"),
+    c("GT_DAT", "GT_ICA"),
+    c("GT_Ctrl", "WT_Ctrl"),
+    c("GT_DAT", "WT_DAT"),
+    c("GT_ICA", "WT_ICA")
+)
+names(comparisons) <- sapply(comparisons, function(x) paste(x, collapse = "_vs_"))
+
+modelMatrix <- model.matrix(fittedModels[[1]])
+contrastZeros <- rep(0, ncol(modelMatrix))
+names(contrastZeros) <- colnames(modelMatrix)
+
+contrasts <- list()
+
+for (comparison in names(comparisons)) {
+    groupA <- paste0("cond", comparisons[[comparison]][1])
+    groupB <- paste0("cond", comparisons[[comparison]][2])
+    currContrast <- contrastZeros
+
+    if (groupA %in% names(currContrast)) {
+        currContrast[groupA] <- 1
+    }
+    if (groupB %in% names(currContrast)) {
+        currContrast[groupB] <- -1
+    }
+    contrasts[[comparison]] <- currContrast
+}
+
+```
+
+```{r comparison_stats, eval=T, echo=F}
+
+comparisonStats <- data.frame()
+logConv <- log(exp(1), base = 2)
+confInt <- 0.95
+
+for (celltype in names(fittedModels)) {
+    covMat <- vcov(fittedModels[[celltype]])
+    betas <- coef(fittedModels[[celltype]])
+
+    for (comparison in names(comparisons)) {
+        currContrast <- contrasts[[comparison]]
+        se <- sqrt(as.numeric(t(currContrast) %*% covMat %*% currContrast))
+        logFC <- as.numeric(currContrast %*% betas)
+        zStat <- logFC/se
+        pVal <- pnorm(abs(zStat), lower.tail = FALSE)*2
+
+        log2FC <- logFC*logConv
+        seLog2 <- se*logConv
+        normQuantile <- seLog2*qnorm((1-confInt)/2, lower.tail = FALSE)
+        ci_lower <- log2FC - normQuantile
+        ci_upper <- log2FC + normQuantile
+
+        currStats <- data.frame(
+            "celltype" = celltype,
+            "comparison" = comparison,
+            "log2FC" = log2FC,
+            "p_val" = pVal,
+            "std_err" = seLog2,
+            "CI_95_lower" = ci_lower,
+            "CI_95_upper" = ci_upper
+        )
+        comparisonStats <- rbind(comparisonStats, currStats)
+    }
+}
+
+comparisonStats <- as.data.frame(
+    comparisonStats %>% group_by(celltype) %>%
+    mutate(p_adj_fdr = p.adjust(p_val, method = "BH")) %>% ungroup %>%
+    relocate(p_adj_fdr, .after = p_val) %>%
+    mutate(celltype = factor(celltype, levels = relevantCelltypes)) %>%
+    mutate(comparison = factor(comparison, levels = names(comparisons)))
+)
+
+```
+
+## Tables of DA results by celltype
+
+```{r comparison_tables, eval=T, echo=F, results='asis'}
+
+for (currCelltype in names(fittedModels)) {
+    cat(paste0("### Celltype: ", currCelltype))
+    cat("\n\n")
+
+    print(kable(comparisonStats %>% filter(celltype %in% currCelltype) %>% dplyr::select(!celltype)))
+    cat("\n\n")
+}
+
+cat("## Comparisons below 20% FDR")
+
+kable(comparisonStats[comparisonStats$p_adj_fdr < 0.2, ])
+
+```
+
+## Plots of DA results by celltype
+
+Plots with 95% confidence intervals.
+
+```{r comparison_plots, eval=T, echo=F, results='asis', fig.dim=c(6, 10)}
+
+comparisonPlots <- list()
+
+for (currCelltype in names(fittedModels)) {
+    cat(paste0("### Celltype: ", currCelltype))
+    cat("\n\n")
+
+    comparisonPlots[[currCelltype]] <- ggplot(
+        comparisonStats %>% filter(celltype == currCelltype),
+        aes(x = comparison, y = log2FC)
+    ) +
+    geom_bar(stat="identity", color="black", position=position_dodge()) +
+    geom_errorbar(
+        aes(ymin = CI_95_lower, ymax = CI_95_upper), width=.2, size = 1,
+        position=position_dodge(.9)
+    ) + coord_flip() + theme_bw()
+
+    print(comparisonPlots[[currCelltype]])
+    cat("\n\n")
+}
+
+```
+
+```{r save_data, echo=FALSE, warning=FALSE, eval=saveData}
+
+saveRDS(
+    fittedModels,
+    proot$find_file(config$outputpath, "data", paste0("glm-nb-fit_cellcounts_norm-lib_monocle_Stem-TA_ref_regress-cc_", today, ".rds"))
+)
+
+write.csv(
+    comparisonStats,
+    proot$find_file(config$outputpath, "table", paste0("glm-nb-fit_cellcounts_norm-lib_monocle_Stem-TA_ref_regress-cc_", today, ".csv")),
+    quote = FALSE,
+    row.names = FALSE
+)
+
+```
+
+# SessionInfo
+
+```{r sessionInfo}
+
+sessionInfo()
+
+```
+

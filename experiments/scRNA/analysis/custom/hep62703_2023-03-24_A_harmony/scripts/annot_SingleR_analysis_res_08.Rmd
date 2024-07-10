@@ -1,0 +1,262 @@
+---
+title: "SingleR annotation analysis"
+author: "Paul Heinrich"
+output: 
+    html_document:
+        toc: true
+---
+
+```{r setup1, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.dim = c(10, 10))
+```
+
+# Notes
+
+With clustering resolution of 0.8. Reference single cell dataset from "A single-cell survey of the small intestinal epithelium"
+(Haber et al., 2017, Nature), available at NCBI GEO (https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE92332).
+
+```{r setup2,echo=FALSE, warning=FALSE, message=FALSE}
+#rbioc_3-14
+library(rprojroot)
+library(yaml)
+library(knitr)
+
+root_criterion <- ".projroot"
+proot <- rprojroot::has_file(root_criterion)
+
+source(proot$find_file("experiments/scRNA/analysis/custom/functions/custom_functions.R"))
+
+params <- list()
+params$config <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/config.yaml")
+params$analparams <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/analparams_preprocessing_filters_2023-03-24.yaml")
+params$date <- Sys.Date()
+
+config <- yaml.load_file(proot$find_file(params$config))
+today <- params$date
+
+clusterCol <- "RNA_snn_res.0.8"
+refName <- "Haber_2017"
+
+config <- yaml.load_file(proot$find_file(params$config))
+analparams <- yaml.load_file(proot$find_file(params$analparams))
+
+# libraries
+libload <- c(
+    "Seurat","ggplot2", "harmony", "Nebulosa", "future",
+    "WriteXLS", "knitr", "stringr", "dplyr", "tidyr", "SingleR"
+)
+
+for(i in libload) {
+    library(i, character.only = T)
+}
+
+plan("multicore", workers = 6)
+plan()
+
+set.seed(7)
+```
+
+```{r loaddata,eval=T,echo=F}
+
+SObj <- readRDS(proot$find_file(analparams$Seurat_clustered))
+
+labelsSingleR <- readRDS(
+    proot$find_file(
+        config$outputpath, "data",
+        paste0("annot_SingleR_", refName, ".rds")
+    )
+)
+labelsSingleRClusters <- readRDS(
+    proot$find_file(
+        config$outputpath, "data",
+        paste0("annot_SingleR_", refName, "_", clusterCol, ".rds")
+    )
+)
+
+```
+
+# SingleR annotation diagnostic plots
+
+## Score Heatmap with annotation at single cell level
+
+```{r score_heatmap_SingleR, eval=T, echo=F, fig.dim=c(15, 10)}
+
+plotScoreHeatmap(labelsSingleR)
+
+```
+
+## Score Heatmap with annotation at cluster level
+
+```{r score_heatmap_SingleR_clusters, eval=T, echo=F, fig.dim=c(15, 10)}
+
+plotScoreHeatmap(labelsSingleRClusters)
+
+```
+
+## Delta distribution plots
+
+```{r delta_distribution_plots, eval=T, echo=F}
+
+plotDeltaDistribution(labelsSingleR, ncol = 3)
+
+```
+
+# UMAP plots
+
+## Clusters and SingleR annotation
+
+```{r umap_plots_annot, eval=T, echo=F}
+
+umapPlotClusters <- DimPlot(SObj, group.by=clusterCol)
+umapPlotAnnot <- DimPlot(SObj, group.by="annot_SingleR")
+umapPlotAnnotClusters <- DimPlot(SObj, group.by=paste0("annot_SingleR_", clusterCol))
+
+umapPlotClusters
+umapPlotAnnot
+umapPlotAnnotClusters
+
+```
+
+```{r umap_plots_annot_combined, eval=T, echo=F, fig.dim=c(18, 9)}
+
+umapPlotClusters + umapPlotAnnot
+umapPlotClusters + umapPlotAnnotClusters
+
+```
+
+## Technical features
+
+```{r umap_plots_technical, eval=T, echo=F}
+
+umapPlotCounts <- FeaturePlot(SObj, features = "nCount_RNA")
+umapPlotFeatures <- FeaturePlot(SObj, features = "nFeature_RNA")
+umapPlotPercentMt <- FeaturePlot(SObj, features = "percent.mt")
+umapPlotPercentRibo <- FeaturePlot(SObj, features = "percent.ribo")
+
+umapPlotCounts
+umapPlotFeatures
+umapPlotPercentMt
+umapPlotPercentRibo
+
+kable(SObj@meta.data %>% group_by(.data[[clusterCol]]) %>% summarise(mean_nCount_RNA = mean(nCount_RNA), sd_nCount_RNA = sd(nCount_RNA)))
+
+```
+
+```{r umap_plots_technical_clusters, eval=T, echo=F, fig.dim=c(18, 9)}
+
+umapPlotClusters + umapPlotCounts
+umapPlotAnnot + umapPlotCounts
+
+```
+
+## UMAP plots of SingleR annotation by group and library
+
+```{r umap_plots_annot_split, eval=T, echo=F, fig.dim=c(15, 8)}
+
+DimPlot(SObj, group.by="annot_SingleR", split.by="group")
+DimPlot(SObj, group.by="annot_SingleR", split.by="orig.ident")
+
+```
+
+## UMAP plots of SingleR scores for each reference cell type
+
+```{r umap_plots_scores, eval=T, echo=F, message=F, fig.dim=c(15, 15)}
+
+scoresSingleR <- labelsSingleR$scores
+singleRScoreIds <- paste0("score_SingleR_", colnames(scoresSingleR))
+colnames(scoresSingleR) <- singleRScoreIds
+
+SObj@meta.data <- cbind(SObj@meta.data, scoresSingleR)
+
+singleRScorePlotList <- list()
+
+for (scoreId in singleRScoreIds) {
+    singleRScorePlotList[[scoreId]] <- FeaturePlot(
+        SObj,
+        features = scoreId
+    ) + scale_color_gradient(limits=c(0, 1), high = "blue", low = "white")
+}
+
+singleRScorePlots <- wrap_plots(singleRScorePlotList, guides = "collect")
+
+singleRScorePlots
+
+singleRScorePlotLimitsList <- list()
+
+for (scoreId in singleRScoreIds) {
+    singleRScorePlotLimitsList[[scoreId]] <- FeaturePlot(
+        SObj,
+        features = scoreId
+    ) + scale_color_gradient(limits=c(0.75, 1), high = "blue", low = "white")
+}
+
+singleRScorePlotsLimits <- wrap_plots(singleRScorePlotLimitsList, guides = "collect")
+
+singleRScorePlotsLimits
+
+```
+
+# Distribution of celltypes across batches and conditions
+
+```{r celltype_fraction_tables, eval=T, echo=F, results='asis'}
+
+clusterFractionTables <- list()
+
+celltypeFractionTables <- getClusterFractionTables(
+    SObj,
+    batchCol = "orig.ident",
+    groupCol = "group",
+    clusterCol = "annot_SingleR"
+)
+
+fractionTypes <- c("group", "batch")
+
+for (fractionType in fractionTypes) {
+    print(paste0("Fractions for: ", fractionType))
+    cat("\n")
+    print(kable(celltypeFractionTables[["pivot"]][[fractionType]][["cluster"]]))
+    cat("\n")
+    print(kable(celltypeFractionTables[["pivot"]][[fractionType]][[fractionType]]))
+    cat("\n")
+}
+
+```
+
+# SingleR annotation tables
+
+## Annotation at single cell level
+
+```{r annot_tables_SingleR, eval=T, echo=F}
+
+kable(table(labelsSingleR$labels))
+
+kable(SObj@meta.data %>% dplyr::count(.data[[clusterCol]], annot_SingleR))
+
+```
+
+## Annotation at cluster level
+
+```{r annot_tables_SingleR_clusters, eval=T, echo=F}
+
+annotTableClusters <- cbind(
+    labelsSingleRClusters[, c("first.labels", "labels", "pruned.labels")],
+    labelsSingleRClusters$tuning.scores
+)
+kable(annotTableClusters)
+
+annotClustersScores <- labelsSingleRClusters$scores
+rownames(annotClustersScores) <- rownames(annotTableClusters)
+
+kable(annotClustersScores)
+
+```
+
+# SessionInfo
+
+```{r sessionInfo}
+
+sessionInfo()
+
+```
+

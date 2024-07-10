@@ -1,0 +1,162 @@
+---
+title: "Analysis of scDblFinder results"
+subtitle: "Cluster mode, no negative cells"
+author: "Paul Heinrich"
+output: 
+    html_document:
+        toc: true
+---
+
+```{r setup1, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.dim = c(8, 8))
+```
+
+# Notes
+
+```{r setup2,echo=FALSE, warning=FALSE}
+#rbioc_3-14
+library(rprojroot)
+library(yaml)
+library(knitr)
+
+root_criterion <- ".projroot"
+proot <- rprojroot::has_file(root_criterion)
+
+params <- list()
+params$config <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/config.yaml")
+params$analparams <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/analparams_preprocessing_filters_2023-03-24.yaml")
+params$date <- Sys.Date()
+
+config <- yaml.load_file(proot$find_file(params$config))
+today <- params$date
+
+print(today)
+
+config <- yaml.load_file(proot$find_file(params$config))
+analparams <- yaml.load_file(proot$find_file(params$analparams))
+
+# libraries
+libload <- c(
+    "Seurat","ggplot2", "harmony", "Nebulosa", "future",
+    "WriteXLS", "knitr", "stringr", "dplyr", "tidyr",
+    "SingleCellExperiment"
+)
+
+for(i in libload) {
+    library(i, character.only = T)
+}
+
+# Increase max size, otherwise it is exceeded for these data
+options(future.globals.maxSize = 1200 * 1024^2)
+
+plan("multicore", workers = 6)
+plan()
+
+set.seed(7)
+```
+
+```{r loaddata,eval=T,echo=F}
+
+SObj <- readRDS(proot$find_file(analparams$Seurat_rawall))
+scDatasets <- readRDS(
+    proot$find_file(config$outputpath, "data", paste0("scDblFinder_cluster-dbr-custom-no-neg_2023-03-29.rds"))
+)
+
+```
+
+```{r process_data, eval=T, echo=F, results='asis'}
+
+scDblFinderCols <- colnames(colData(scDatasets[[1]]))[grep("^scDblFinder", colnames(colData(scDatasets[[1]])))]
+
+for (sample in names(scDatasets)) {
+    SObj@meta.data[colnames(scDatasets[[sample]]), scDblFinderCols] <- as.data.frame(colData(scDatasets[[sample]]))[
+       colnames(scDatasets[[sample]]), scDblFinderCols
+    ]
+}
+
+cellsSelected <- rownames(SObj@meta.data)[
+    (SObj$HTO_classification.global != "Negative") & SObj$keep_filters
+]
+SObj <- subset(SObj, cells = cellsSelected)
+
+```
+
+```{r clustering, eval=T, echo=F}
+
+SObj <- NormalizeData(
+  SObj,
+  normalization.method = "LogNormalize",
+  scale.factor = 1e4
+)
+
+SObj <- SObj %>%
+    FindVariableFeatures(nfeatures = analparams$scParam$VarFeat) %>%
+    ScaleData() %>%
+    RunPCA()
+
+if(!is.null(analparams$scParam$PCdims)) {
+    PCdimsmax <- analparams$scParam$PCdims
+} else {
+    PCdimsmax <- 30
+    analparams$scParam$PCdims <- PCdimsmax
+}
+
+SObj <- SObj %>%
+    RunUMAP(reduction = "pca", dims = 1:analparams$scParam$PCdims) %>%
+    FindNeighbors(reduction = "pca", dims = 1:analparams$scParam$PCdims) %>%
+    FindClusters(resolution = 0.5)
+
+```
+
+# UMAP plots
+
+```{r umap_dim_plots, eval=T, echo=F, fig.dim = c(15,10)}
+
+SObj$doublet_total <- ifelse(
+    (SObj$scDblFinder.class == "doublet") | (SObj$HTO_classification.global == "Doublet"), "Doublet", "Singlet"
+)
+
+DimPlot(SObj, group.by = "seurat_clusters") + DimPlot(SObj, group.by = "doublet_total")
+DimPlot(SObj, group.by = "seurat_clusters") + DimPlot(SObj, group.by = "scDblFinder.class")
+DimPlot(SObj, group.by = "seurat_clusters") + DimPlot(SObj, group.by = "HTO_classification.global")
+
+DimPlot(SObj, group.by = "seurat_clusters", split.by = "orig.ident")
+DimPlot(SObj, group.by = "doublet_total", split.by = "orig.ident")
+DimPlot(SObj, group.by = "scDblFinder.class", split.by = "orig.ident")
+DimPlot(SObj, group.by = "HTO_classification.global", split.by = "orig.ident")
+
+```
+
+# Doublet tables
+
+```{r fraction_tables, eval=T, echo=F, fig.dim = c(15,10)}
+
+kable(SObj@meta.data %>%
+    dplyr::group_by(orig.ident, HTO_classification.global, scDblFinder.class) %>%
+    summarise(mean_scDbl_score = mean(scDblFinder.score), n = n(), mean_lib_size = mean(nCount_RNA)))
+
+kable(SObj@meta.data %>%
+    dplyr::group_by(orig.ident, doublet_total) %>%
+    summarise(mean_scDbl_score = mean(scDblFinder.score), n = n(), mean_lib_size = mean(nCount_RNA)))
+
+kable(SObj@meta.data %>%
+    dplyr::count(seurat_clusters, doublet_total) %>%
+    group_by(seurat_clusters) %>%
+    mutate(fraction = prop.table(n)))
+
+kable(SObj@meta.data %>%
+    dplyr::count(seurat_clusters, scDblFinder.class) %>%
+    group_by(seurat_clusters) %>%
+    mutate(fraction = prop.table(n)))
+
+```
+
+# SessionInfo
+
+```{r sessionInfo}
+
+sessionInfo()
+
+```
+

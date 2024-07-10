@@ -1,0 +1,336 @@
+---
+title: "QC_report"
+author: "Inma Hernandez & Nicholas Strieder"
+output: html_document
+---
+
+```{r setup1, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Quality plots
+
+```{r setup2,echo=FALSE, warning=FALSE}
+#rbioc_3-14
+library(rprojroot)
+library(yaml)
+library(knitr)
+
+root_criterion <- ".projroot"
+proot <- rprojroot::has_file(root_criterion)
+
+saveData <- FALSE
+
+params <- list()
+params$config <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/config.yaml")
+params$analparams <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/analparams_preprocessing_2023-03-24.yaml")
+params$date <- Sys.Date()
+
+config <- yaml.load_file(proot$find_file(params$config))
+today <- params$date
+
+print(today)
+
+config <- yaml.load_file(proot$find_file(params$config))
+analparams <- yaml.load_file(proot$find_file(params$analparams))
+
+# libraries
+libload<-c("Seurat","ggpubr","tidyverse","plyr","ggplot2",
+        "cowplot","ggExtra","harmony","WriteXLS","Nebulosa","future", "dplyr")
+
+for(i in libload){
+             library(i,character.only = T)}
+
+# parallelization in Seurat with future
+# see https://satijalab.org/seurat/articles/future_vignette.html
+
+# Increase max size, otherwise it is exceeded for these data
+options(future.globals.maxSize = 800 * 1024^2)
+
+plan("multicore", workers = 6)
+plan()
+
+# bibliography
+
+try(
+    knitr::write_bib(
+        c(.packages()),
+        proot$find_file(config$outputpath, "references/R.bib")
+    )
+)
+
+dircreatefun<-function(x,out=config$outputpath){
+    if(grepl(out,x)==FALSE){
+        relpath <- file.path(out,x)
+    }else{
+        relpath <- x
+    }
+    if(dir.exists(proot$find_file(relpath)) == FALSE){
+        dir.create(proot$find_file(relpath))}
+    return(relpath)}
+for (i in names(analparams$outpath)){
+    analparams$outpath[[i]] <- dircreatefun(analparams$outpath[[i]])
+    }
+set.seed(7)
+
+```
+
+```{r loaddata,eval=T,echo=F}
+
+SObj <- readRDS(proot$find_file(analparams$Seurat_rawall))
+samples <- names(table(SObj@meta.data$orig.ident))
+
+SObj[["percent.mt"]] <- PercentageFeatureSet(SObj, pattern = "^mt-")
+if(config$species=="mus musculus"){
+    ribopatt="^Rp[sl]"
+}else if (config$species=="homo sapiens"){
+    ribopatt="^RP[SL]"
+}else{
+    print("unknown species")
+}
+SObj[["percent.ribo"]] <- PercentageFeatureSet(SObj, pattern = ribopatt)
+
+SObj[["keep_doublets"]] <- TRUE
+SObj[["keep_filters"]] <- TRUE
+SObj[["keep_libs"]] <- TRUE
+
+# todo
+# if(cellhashing){
+# need to split samples into all subcategories or label them respectively
+# try to also cope with more complex cases, i.e. different patients for each HTOSample combination,
+# simple hashing: same pattern i.e. Mouse 1,2,3 over condition.
+#Vfiles_to_load <- list.files(path_to_sample)
+#gem_ids <- files_to_load %>%
+#  str_remove("_library_run_1to3.rds")
+#
+#files_to_load <- str_c(path_to_sample, files_to_load, sep = "")
+##purrr::map() is a function for applying a function to each element of a list. 
+##https://jennybc.github.io/purrr-tutorial/ls01_map-name-position-shortcuts.html
+#Patient_list <- purrr::map(files_to_load, readRDS)
+#names(Patient_list) <- gem_ids
+#
+#path_to_save <- str_c(path_to_results, "p036_merged.rds", sep = "")
+#
+#for (i in 1:length(Patient_list)) {
+#  print(gem_ids[i])
+#  Patient_list[[i]]$orig.ident <- gem_ids[i]
+#  Patient_list[[i]]$group <- Patient_list[[i]]$hash.ID
+#}
+#
+#
+#Patient_hashed <- Patient_list[[1]]
+#for (i in 2:length(Patient_list)) {
+#  print(gem_ids[i])
+#  Patient_hashed <- merge(x = Patient_hashed, y = Patient_list[[i]])#, add.cell.ids = c("Patient1","Healthy"))
+#}
+#
+# Here subseting to functions set, so negative and Doublets are removed
+#Idents(Patient_hashed) <- "group"
+#Patient_hashed <- subset(Patient_hashed, idents = c("colon","DonorTreg","liver","spleen"))
+#rm(Patient_list)
+#table(Patient_hashed$group)
+#table(Patient_hashed$orig.ident, Patient_hashed$group)
+
+#Filtering by MT percent, number of features and number of counts
+
+if(config$cellhash){
+  #plot common distribution number of counts, number of features
+  p  = ggplot(SObj@meta.data, aes(x = nCount_RNA, y = nFeature_RNA)) + geom_point(aes(color = HTO_classification.global), size = 1) +
+  scale_y_continuous(trans = "log10") + scale_x_continuous(trans = "log10") + theme_cowplot(12) + geom_vline(xintercept = 750, linetype = 3) + geom_hline(yintercept = 250, linetype = 3)
+  print(p)
+
+  NAhashID<-which(is.na(SObj$hash.ID))
+  SObj@meta.data[NAhashID,"hash.ID"]<-substr(SObj@meta.data[NAhashID,"orig.ident"],1,5)      
+  SObj$group <- SObj$hash.ID
+
+  print(table(SObj$orig.ident,SObj$group))
+
+  Idents(SObj)<-"group"
+
+  SObj@meta.data[["keep_doublets"]][SObj@meta.data[["group"]] %in% c("Doublet", "Negative")] <- FALSE
+
+  cellsSelected <- rownames(SObj@meta.data)[SObj@meta.data[["keep_doublets"]]]
+  SObjSubset <- subset(SObj, cells = cellsSelected)
+
+  print(table(SObjSubset$orig.ident,SObjSubset$group))
+} else {
+  SObjSubset <- SObj
+}
+
+print(table(SObjSubset$orig.ident))
+
+```
+
+```{r create_SObj_subset,eval=T,echo=F,warning=F,message=F}
+
+# Filters on cell features
+
+filterParams <- analparams$filters
+
+boolSelector <- SObj@meta.data[["keep_filters"]]
+
+for (filterParam in names(filterParams)) {
+    if (!(is.null(filterParams[[filterParam]])[1])) {
+        lower <- filterParams[[filterParam]][1]
+        upper <- filterParams[[filterParam]][2]
+        boolSelector <- boolSelector & between(SObj@meta.data[[filterParam]], lower, upper)
+    }
+}
+
+SObj[["keep_filters"]] <- boolSelector
+
+# Libraries to exclude
+
+if(!is.null(analparams$libsExclude)) {
+  SObj[["keep_libs"]] <- !(SObj$orig.ident %in% analparams$libsExclude)
+}
+
+SObj[["keep"]] <- SObj@meta.data[["keep_doublets"]] & SObj@meta.data[["keep_filters"]] & SObj[["keep_libs"]]
+
+cellsSelected <- rownames(SObj@meta.data)[SObj@meta.data[["keep"]]]
+SObjSubset <- subset(SObj, cells = cellsSelected)
+
+```
+
+## QC Metrics
+
+The main qc metrices for single cell data a number of genes per cell (aka nFeature_RNA),
+number of reads per cell (aka nCount_RNA) and percentage of Mitochondrial genes (percent.mt).
+
+```{r QCTable,eval=T,echo=F,warning=F,message=F}
+df <- ddply(
+    SObjSubset@meta.data,.(orig.ident,group),summarize,
+    nCount_RNA_mean=mean(nCount_RNA),
+    nCount_RNA_median=median(nCount_RNA),
+    nFeature_RNA_mean=mean(nFeature_RNA),
+    nFeature_RNA_median=median(nFeature_RNA)
+)
+kable(df,caption="nCount and nFeature Statitics")
+```
+
+```{r QCMet1,eval=T,echo=F,warning=F,message=F}
+if(config$cellhash){
+VlnPlot(SObjSubset, 
+        c("nFeature_RNA", "nCount_RNA", "percent.mt"), 
+        ncol = 3, group.by = "group", pt.size = -1)
+VlnPlot(SObjSubset, 
+        c("nFeature_RNA", "nCount_RNA", "percent.ribo"), 
+        ncol = 3, group.by = "group", pt.size = -1)
+}
+
+VlnPlot(SObjSubset, 
+        c("nFeature_RNA", "nCount_RNA", "percent.mt"), 
+        ncol = 3, group.by = "orig.ident", pt.size = -1)
+
+
+VlnPlot(SObjSubset, 
+        c("nFeature_RNA", "nCount_RNA", "percent.ribo"), 
+        ncol = 3, group.by = "orig.ident", pt.size = -1)
+
+```
+
+```{r QCMet1Tables,eval=T,echo=F,warning=F,message=F}
+
+nCountTable <- SObjSubset@meta.data %>% group_by(orig.ident) %>% dplyr::summarise(
+  mean = mean(nCount_RNA), median = median(nCount_RNA), max = max(nCount_RNA), n = n()
+)
+
+nFeatureTable <- SObjSubset@meta.data %>% group_by(orig.ident) %>% dplyr::summarise(
+  mean = mean(nFeature_RNA), median = median(nFeature_RNA), max = max(nFeature_RNA), n = n()
+)
+
+nCountTableGroup <- SObjSubset@meta.data %>% group_by(orig.ident, group) %>% dplyr::summarise(
+  mean = mean(nCount_RNA), median = median(nCount_RNA), max = max(nCount_RNA), n = n()
+)
+
+nFeatureTableGroup <- SObjSubset@meta.data %>% group_by(orig.ident, group) %>% dplyr::summarise(
+  mean = mean(nFeature_RNA), median = median(nFeature_RNA), max = max(nFeature_RNA), n = n()
+)
+
+print("Table nCount RNA")
+kable(nCountTable)
+print("Table nFeature RNA")
+kable(nFeatureTable)
+
+print("Table nCount RNA, groups")
+kable(nCountTableGroup)
+print("Table nFeature RNA, groups")
+kable(nFeatureTableGroup)
+
+```
+
+## Distibution of number of counts and features
+
+```{r Distribution1,echo=FALSE, warning=FALSE}
+#plot common distribution number of counts, number of features
+mid <- 5
+p  = ggplot(SObjSubset@meta.data, aes(x = nCount_RNA, y = nFeature_RNA)) + geom_point(aes(color = percent.mt), size = 1) +
+scale_color_gradient2(midpoint = mid, low = "black", mid = "grey", high ="red") + scale_y_continuous(trans = "log10") + scale_x_continuous(trans = "log10") + theme_cowplot(12) + geom_vline(xintercept = 750, linetype = 3) + geom_hline(yintercept = 250, linetype = 3) 
+ggMarginal(p, type = "densigram", size = 10)
+```
+
+```{r Distribution2,echo=FALSE, warning=FALSE}
+p  = ggplot(SObjSubset@meta.data, aes(x = nCount_RNA, y = nFeature_RNA)) + geom_point(aes(color = percent.ribo), size = 1) +
+scale_color_gradient2(midpoint = mid, low = "black", mid = "grey", high ="red") + scale_y_continuous(trans = "log10") + scale_x_continuous(trans = "log10") + theme_cowplot(12) + geom_vline(xintercept = 750, linetype = 3) + geom_hline(yintercept = 250, linetype = 3) 
+ggMarginal(p, type = "densigram", size = 10)
+
+```
+
+```{r Distribution3,echo=FALSE, warning=FALSE}
+
+#plot individual distribution number of counts, number of features
+mid <- 5
+p<-ggplot(SObjSubset@meta.data, aes(x = nCount_RNA, y = nFeature_RNA)) + geom_point(aes(color = percent.mt), size = 1) +
+scale_color_gradient2(midpoint = mid, low = "black", mid = "grey", high ="red") + scale_y_continuous(trans = "log10") + scale_x_continuous(trans = "log10") + theme_cowplot(12) + facet_wrap( ~orig.ident, ncol = 2) + geom_vline(xintercept = 750, linetype = 3) + geom_hline(yintercept = 250, linetype = 3)
+p
+p<-ggplot(SObjSubset@meta.data, aes(x = nCount_RNA, y = nFeature_RNA)) + geom_point(aes(color = percent.ribo), size = 1) +
+scale_color_gradient2(midpoint = mid, low = "black", mid = "grey", high ="red") + scale_y_continuous(trans = "log10") + scale_x_continuous(trans = "log10") + theme_cowplot(12) + facet_wrap( ~orig.ident, ncol = 2) + geom_vline(xintercept = 750, linetype = 3) + geom_hline(yintercept = 250, linetype = 3)
+p
+
+#plot number of genes
+
+n_genes_hist1 <- SObjSubset@meta.data %>%
+  ggplot(aes(nFeature_RNA)) +
+    geom_histogram(bins = 100) +
+    labs(x = "Number of Detected Genes", y = "Number of Cells") +
+    # scale_x_log10() +
+    theme_pubr()
+n_genes_hist2 <- SObjSubset@meta.data %>%
+  ggplot(aes(nFeature_RNA)) +
+    geom_histogram(bins = 100) +
+    scale_x_continuous(limits = c(0, 1000)) +
+    labs(x = "Number of Detected Genes", y = "Number of Cells") +
+    theme_pubr()
+
+ggarrange(plotlist = list(n_genes_hist1, n_genes_hist2), ncol = 2)
+
+n_genes_hist1 <- SObjSubset@meta.data %>%
+  ggplot(aes(nCount_RNA)) +
+    geom_histogram(bins = 100) +
+    labs(x =  "Library Size (log10(total UMI))", y = "Number of Cells") +
+    # scale_x_log10() +
+    theme_pubr()
+n_genes_hist2 <- SObjSubset@meta.data %>%
+  ggplot(aes(nCount_RNA)) +
+    geom_histogram(bins = 100) +
+    scale_x_continuous(limits = c(0, 2000)) +
+    labs(x =  "Library Size (log10(total UMI))", y = "Number of Cells") +
+    theme_pubr()
+
+ggarrange(plotlist = list(n_genes_hist1, n_genes_hist2), ncol = 2)
+
+```
+
+```{r save_data, echo=FALSE, warning=FALSE, eval=saveData}
+
+saveRDS(SObj, proot$find_file(analparams$Seurat_rawall))
+
+```
+
+# SessionInfo
+
+```{r sessionInfo}
+sessionInfo()
+
+```
+

@@ -1,0 +1,240 @@
+---
+title: "Differential expression between conditions"
+subtitle: "Testing with NEBULA"
+author: "Paul Heinrich"
+output: 
+    html_document:
+        toc: true
+---
+
+```{r setup1, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.dim = c(10, 10))
+```
+
+# Notes
+
+Reference single cell dataset from "A single-cell survey of the small intestinal epithelium"
+(Haber et al., 2017, Nature), available at NCBI GEO (https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE92332).
+
+```{r setup2,echo=FALSE, warning=FALSE, message=FALSE}
+#rbioc_3-14
+library(rprojroot)
+library(yaml)
+library(knitr)
+
+saveData <- TRUE
+
+root_criterion <- ".projroot"
+proot <- rprojroot::has_file(root_criterion)
+
+source(proot$find_file("experiments/scRNA/analysis/custom/functions/custom_functions.R"))
+
+params <- list()
+params$config <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/config.yaml")
+params$analparams <- proot$find_file("experiments/scRNA/analysis/custom/hep62703_2023-03-24_A_harmony/analparams_preprocessing_filters_2023-03-24.yaml")
+params$date <- Sys.Date()
+
+config <- yaml.load_file(proot$find_file(params$config))
+analparams <- yaml.load_file(proot$find_file(params$analparams))
+today <- params$date
+
+print(today)
+
+# libraries
+
+libload <- c(
+    "Seurat", "ggplot2", "harmony", "Nebulosa", "future",
+    "WriteXLS", "knitr", "stringr", "dplyr", "tidyr", "nebula",
+    "foreach", "doParallel"
+)
+
+for(i in libload) {
+    library(i, character.only = T)
+}
+
+# Parallelization with future
+
+plan("multicore", workers = 6)
+plan()
+
+# Parallelization with doParallel
+
+registerDoParallel(7)
+
+set.seed(7)
+
+```
+
+```{r loaddata,eval=T,echo=F}
+
+identCol <- "annot_SingleR_mod_monocle_Stem.TA_ref_regress.cc"
+relevantCelltypes <- c(
+    "Stem",
+    "Stem.TA",
+    "TA",
+    "Enterocyte.Progenitor",
+    "Enterocyte",
+    "Endocrine",
+    "Goblet.Paneth"
+)
+
+SObj <- readRDS(proot$find_file(analparams$Seurat_clustered))
+
+Idents(SObj) <- SObj[[identCol]]
+
+```
+
+```{r prepare_data, eval=T, echo=F}
+
+metadata <- SObj@meta.data %>%
+    dplyr::rename(celltype = .data[[identCol]]) %>%
+    filter(celltype %in% relevantCelltypes)
+
+libraryMapping <- c("L2", "L3", "L5")
+names(libraryMapping) <- c("A2-library-2", "A3-library-2", "A5-library-2")
+
+replicateMapping <- c("R1", "R2", "R3")
+names(replicateMapping) <- c("A2-library-2", "A3-library-2", "A5-library-2")
+
+metadata[["lib"]] <- sapply(metadata[["orig.ident"]], function(x) libraryMapping[x])
+metadata[["repl"]] <- sapply(metadata[["orig.ident"]], function(x) replicateMapping[x])
+metadata[["treat"]] <- str_replace(metadata[["group"]], "-", "_")
+metadata[["subject"]] <- paste0(metadata[["repl"]], "_", metadata[["treat"]])
+
+# Proper order for model factors
+
+metadata[["celltype"]] <- factor(
+    metadata[["celltype"]],
+    levels = relevantCelltypes
+)
+
+metadata[["lib"]] <- factor(
+    metadata[["lib"]],
+    levels = sort(unique(metadata$lib))
+)
+
+treats <- sort(unique(metadata[["treat"]]))
+
+metadata[["treat"]] <- factor(
+    metadata[["treat"]],
+    levels = c(treats[4:6], treats[1:3])
+)
+
+metadata <- metadata %>% arrange(celltype, treat, lib)
+
+predictorsCategorical <- c("lib", "treat")
+predictorsNumeric <- c("nFeature_RNA", "percent.mt", "percent.ribo")
+predictors <- c(predictorsCategorical, predictorsNumeric)
+selectCols <- c("celltype", "subject", "repl", predictors, "nCount_RNA")
+
+varTable <- metadata %>% select(all_of(selectCols))
+
+# Nebula requires data to be arranged by subject
+
+varTable <- varTable %>% arrange(subject)
+
+counts <- GetAssayData(SObj, slot = "counts")
+
+varTablesCelltype <- list()
+countsCelltype <- list()
+
+for (currCelltype in relevantCelltypes) {
+    cellIds <- rownames(varTable %>% filter(celltype %in% currCelltype))
+    varTablesCelltype[[currCelltype]] <- varTable[cellIds, ]
+    countsCelltype[[currCelltype]] <- counts[, cellIds]
+}
+
+```
+
+```{r fit_nebula_model, eval=T, echo=F}
+
+modelFormula <- formula(paste0("~", paste0(predictorsCategorical, collapse = "+"), "+ nFeature_RNA"))
+modelMatrices <- list()
+
+for (celltype in relevantCelltypes) {
+    contrastsArg <- list()
+
+    for (predictor in predictorsCategorical) {
+        contrastsArg[[predictor]] <- contrasts(varTablesCelltype[[celltype]][[predictor]])
+        colnames(contrastsArg[[predictor]]) <- paste0("_", colnames(contrastsArg[[predictor]]))
+    }
+
+    modelMatrices[[celltype]] <- model.matrix(
+        modelFormula,
+        data = varTablesCelltype[[celltype]],
+        contrasts.arg = contrastsArg
+    )
+}
+
+print(Sys.time())
+
+nebulaFit <- foreach(celltype = relevantCelltypes) %dopar% {
+    print(paste0("Celltype: ", celltype))
+    print("Start")
+    print(Sys.time())
+
+    nebulaRes <- nebula(
+        count = countsCelltype[[celltype]],
+        id = varTablesCelltype[[celltype]]$subject,
+        pred = modelMatrices[[celltype]],
+        offset = varTablesCelltype[[celltype]]$nCount_RNA,
+        model = "NBGMM",
+        method = "LN",
+        cpc = 0.005,
+        covariance = TRUE,
+        verbose = TRUE
+    )
+
+    print(paste0("Celltype: ", celltype))
+    print("End")
+    print(Sys.time())
+
+    nebulaRes
+}
+names(nebulaFit) <- relevantCelltypes
+
+print(Sys.time())
+
+comparisons <- c(
+    "treat_WT_DAT",
+    "treat_WT_ICA",
+    "treat_GT_Ctrl",
+    "lib_L3",
+    "lib_L5",
+    "nFeature_RNA"
+)
+
+fractionBelowThreshold <- list()
+threshold <- 0.05
+
+for (celltype in relevantCelltypes) {
+    fractionBelowThreshold[[celltype]] <- c()
+    for (comparison in comparisons) {
+        fractionBelowThreshold[[celltype]][comparison] <- sum(
+            nebulaFit[[celltype]]$summary[[paste0("p_", comparison)]] <= threshold
+        )/length(nebulaFit[[celltype]]$summary[[paste0("p_", comparison)]])
+    }
+}
+
+print(fractionBelowThreshold)
+
+```
+
+```{r save_data, echo=FALSE, warning=FALSE, eval=saveData}
+
+saveRDS(
+    nebulaFit,
+    proot$find_file(config$outputpath, "data", paste0("diff_expr_nebula_cond_cpc-0.005_monocle_Stem-TA_ref_regress-cc_", today, ".rds"))
+)
+
+```
+
+# SessionInfo
+
+```{r sessionInfo}
+
+sessionInfo()
+
+```
+
